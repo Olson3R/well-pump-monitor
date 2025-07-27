@@ -16,7 +16,7 @@
 #include "SensorManager.h"
 #include "DataCollector.h"
 #include "EventDetector.h"
-#include "MongoDBClient.h"
+#include "APIClient.h"
 
 AsyncWebServer server(80);
 Preferences preferences;
@@ -51,7 +51,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &I2C_OLED, OLED_RESET);
 SensorManager* sensorManager;
 DataCollector* dataCollector;
 EventDetector* eventDetector;
-WellPumpMongoClient* mongoClient;
+WellPumpAPIClient* apiClient;
 
 const char* AP_SSID = "WellPump-Config";
 const char* AP_PASSWORD = "pumphouse";
@@ -65,10 +65,10 @@ const uint8_t LED_PIN = 2;       // Built-in LED
 
 String wifi_ssid = "";
 String wifi_password = "";
-String mongo_url = "";
-String mongo_api_key = "";
-String mongo_data_source = "";
-String mongo_database = "";
+String api_base_url = "";
+String api_key = "";
+bool api_use_https = true;
+bool api_verify_cert = false;
 
 bool wifi_connected = false;
 bool system_healthy = false;
@@ -101,12 +101,12 @@ void setupMDNS();
 void setupWebServer();
 void setupNTP();
 void setupSensors();
-void setupMongoDB();
+void setupAPI();
 void setupDisplay();
 void setupLoRa();
 void loadConfiguration();
 void saveWiFiCredentials(const String& ssid, const String& password);
-void saveMongoCredentials(const String& url, const String& apiKey, const String& dataSource, const String& database);
+void saveAPICredentials(const String& url, const String& apiKey, bool useHttps, bool verifyCert);
 
 void updateLED();
 void updateSystem();
@@ -120,7 +120,7 @@ void handleAPI_Status(AsyncWebServerRequest *request);
 void handleAPI_Calibrate(AsyncWebServerRequest *request);
 void handleAPI_ResetAlarms(AsyncWebServerRequest *request);
 void handleWiFiConfig(AsyncWebServerRequest *request);
-void handleMongoConfig(AsyncWebServerRequest *request);
+void handleAPIConfig(AsyncWebServerRequest *request);
 void handleRestart(AsyncWebServerRequest *request);
 
 void setup() {
@@ -146,7 +146,7 @@ void setup() {
     setupWebServer();
     setupNTP();
     setupSensors();
-    setupMongoDB();
+    setupAPI();
     setupDisplay();
     setupLoRa();
     
@@ -166,6 +166,10 @@ void loop() {
     updateDisplay();
     logData();
     
+    if (apiClient) {
+        apiClient->update();
+    }
+    
     if (WiFi.status() != WL_CONNECTED && wifi_ssid.length() > 0) {
         if (millis() - wifi_retry_timer > WIFI_RETRY_INTERVAL) {
             Serial.println("WiFi disconnected, attempting reconnection...");
@@ -184,16 +188,16 @@ void loop() {
 void loadConfiguration() {
     wifi_ssid = preferences.getString("ssid", "");
     wifi_password = preferences.getString("password", "");
-    mongo_url = preferences.getString("mongo_url", "");
-    mongo_api_key = preferences.getString("mongo_api_key", "");
-    mongo_data_source = preferences.getString("mongo_data_source", "");
-    mongo_database = preferences.getString("mongo_database", "");
+    api_base_url = preferences.getString("api_url", "");
+    api_key = preferences.getString("api_key", "");
+    api_use_https = preferences.getBool("api_https", true);
+    api_verify_cert = preferences.getBool("api_verify", false);
     
     Serial.println("Loaded configuration:");
     Serial.println("WiFi SSID: " + wifi_ssid);
-    Serial.println("MongoDB URL: " + mongo_url);
-    Serial.println("MongoDB Data Source: " + mongo_data_source);
-    Serial.println("MongoDB Database: " + mongo_database);
+    Serial.println("API URL: " + api_base_url);
+    Serial.println("API HTTPS: " + String(api_use_https ? "Yes" : "No"));
+    Serial.println("API Verify Cert: " + String(api_verify_cert ? "Yes" : "No"));
 }
 
 void saveWiFiCredentials(const String& ssid, const String& password) {
@@ -204,16 +208,16 @@ void saveWiFiCredentials(const String& ssid, const String& password) {
     Serial.println("Saved WiFi credentials: " + ssid);
 }
 
-void saveMongoCredentials(const String& url, const String& apiKey, const String& dataSource, const String& database) {
-    preferences.putString("mongo_url", url);
-    preferences.putString("mongo_api_key", apiKey);
-    preferences.putString("mongo_data_source", dataSource);
-    preferences.putString("mongo_database", database);
-    mongo_url = url;
-    mongo_api_key = apiKey;
-    mongo_data_source = dataSource;
-    mongo_database = database;
-    Serial.println("Saved MongoDB credentials");
+void saveAPICredentials(const String& url, const String& apiKey, bool useHttps, bool verifyCert) {
+    preferences.putString("api_url", url);
+    preferences.putString("api_key", apiKey);
+    preferences.putBool("api_https", useHttps);
+    preferences.putBool("api_verify", verifyCert);
+    api_base_url = url;
+    api_key = apiKey;
+    api_use_https = useHttps;
+    api_verify_cert = verifyCert;
+    Serial.println("Saved API credentials");
 }
 
 void setupWiFi() {
@@ -344,23 +348,26 @@ void setupSensors() {
     Serial.println("Sensors initialized successfully");
 }
 
-void setupMongoDB() {
-    if (mongo_url.length() == 0 || mongo_api_key.length() == 0) {
-        Serial.println("No MongoDB credentials, skipping initialization");
+void setupAPI() {
+    if (api_base_url.length() == 0) {
+        Serial.println("No API URL configured, skipping initialization");
         return;
     }
     
-    Serial.println("Initializing MongoDB client...");
+    Serial.println("Initializing API client...");
     
-    mongoClient = new WellPumpMongoClient(
-        mongo_url, mongo_api_key, mongo_data_source, mongo_database,
-        HOSTNAME, "Pump House"
-    );
+    APIConfig config;
+    config.baseURL = api_base_url;
+    config.apiKey = api_key;
+    config.useHttps = api_use_https;
+    config.verifyCertificate = api_verify_cert;
     
-    if (mongoClient->begin()) {
-        Serial.println("MongoDB client initialized successfully");
+    apiClient = new WellPumpAPIClient(config, HOSTNAME, "Pump House");
+    
+    if (apiClient->begin()) {
+        Serial.println("API client initialized successfully");
     } else {
-        Serial.println("MongoDB client initialization failed");
+        Serial.println("API client initialization failed");
     }
 }
 
@@ -373,7 +380,7 @@ void setupWebServer() {
     server.on("/api/reset-alarms", HTTP_POST, handleAPI_ResetAlarms);
     
     server.on("/config/wifi", HTTP_POST, handleWiFiConfig);
-    server.on("/config/mongo", HTTP_POST, handleMongoConfig);
+    server.on("/config/api", HTTP_POST, handleAPIConfig);
     server.on("/restart", HTTP_POST, handleRestart);
     
     server.serveStatic("/", SPIFFS, "/").setDefaultFile("index.html");
@@ -391,8 +398,8 @@ void updateSystem() {
         eventDetector->update();
     }
     
-    if (mongoClient) {
-        mongoClient->update();
+    if (apiClient) {
+        apiClient->update();
     }
     
     system_healthy = sensorManager && sensorManager->isHealthy() && 
@@ -433,7 +440,7 @@ void updateLED() {
 }
 
 void logData() {
-    if (!mongoClient || !dataCollector) {
+    if (!apiClient || !dataCollector) {
         return;
     }
     
@@ -445,14 +452,14 @@ void logData() {
     
     AggregatedData aggregated;
     if (dataCollector->getAggregatedData(aggregated)) {
-        mongoClient->writeAggregatedData(aggregated);
+        apiClient->sendSensorData(aggregated);
     }
     
     if (eventDetector) {
         for (uint8_t i = 0; i < eventDetector->getEventCount(); i++) {
             Event event = eventDetector->getEvent(i);
             if (event.active) {
-                mongoClient->writeEvent(event);
+                apiClient->sendEvent(event);
             }
         }
     }
@@ -561,11 +568,11 @@ void handleAPI_Status(AsyncWebServerRequest *request) {
     doc["freeHeap"] = ESP.getFreeHeap();
     doc["time"] = timeClient.getFormattedTime();
     
-    if (mongoClient) {
-        doc["mongodb"] = mongoClient->getConnectionStatus();
-        doc["bufferedData"] = mongoClient->getBufferedCount();
+    if (apiClient) {
+        doc["api"] = apiClient->getConnectionStatus();
+        doc["bufferedData"] = apiClient->getBufferedCount();
     } else {
-        doc["mongodb"] = "Not Configured";
+        doc["api"] = "Not Configured";
     }
     
     doc["lora"] = lora_enabled ? "Ready" : "Disabled";
@@ -612,15 +619,17 @@ void handleWiFiConfig(AsyncWebServerRequest *request) {
     ESP.restart();
 }
 
-void handleMongoConfig(AsyncWebServerRequest *request) {
+void handleAPIConfig(AsyncWebServerRequest *request) {
     String url = request->getParam("url", true)->value();
     String apiKey = request->getParam("apiKey", true)->value();
-    String dataSource = request->getParam("dataSource", true)->value();
-    String database = request->getParam("database", true)->value();
+    bool useHttps = request->hasParam("useHttps", true) ? 
+                   (request->getParam("useHttps", true)->value() == "true") : true;
+    bool verifyCert = request->hasParam("verifyCert", true) ? 
+                     (request->getParam("verifyCert", true)->value() == "true") : false;
     
-    saveMongoCredentials(url, apiKey, dataSource, database);
+    saveAPICredentials(url, apiKey, useHttps, verifyCert);
     
-    request->send(200, "application/json", "{\"status\":\"MongoDB credentials saved. Restarting...\"}");
+    request->send(200, "application/json", "{\"status\":\"API credentials saved. Restarting...\"}");
     
     delay(2000);
     ESP.restart();

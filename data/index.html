@@ -134,8 +134,8 @@
         <div class="sensor-value ${getStatusClass(systemStatus.wifi)}">${systemStatus.wifi || 'Unknown'}</div>
       </div>
       <div class="sensor-card">
-        <div>MongoDB</div>
-        <div class="sensor-value ${getStatusClass(systemStatus.mongodb)}">${systemStatus.mongodb || 'Unknown'}</div>
+        <div>API</div>
+        <div class="sensor-value ${getStatusClass(systemStatus.api)}">${systemStatus.api || 'Unknown'}</div>
       </div>
       <div class="sensor-card">
         <div>Uptime</div>
@@ -218,8 +218,64 @@
 
   <section class="${state === 'settings' ? '' : 'hidden'}">
     <h2>Settings</h2>
-    <p>Configuration settings will be available here.</p>
-    <button class="button button-outline" onClick=${() => setState('main')}>Back to Main</button>
+    
+    <div>
+      <h3>WiFi Configuration</h3>
+      <form onSubmit=${(e) => {
+        e.preventDefault()
+        const formData = new FormData(e.target)
+        fetch('/config/wifi', {
+          method: 'POST',
+          body: formData
+        }).then(() => {
+          updateMessage('WiFi settings saved, restarting...')
+        }).catch(() => {
+          updateMessage('WiFi configuration failed')
+        })
+      }}>
+        <input type="text" name="ssid" placeholder="WiFi SSID" required />
+        <input type="password" name="password" placeholder="WiFi Password" required />
+        <button class="button" type="submit">Save WiFi</button>
+      </form>
+    </div>
+
+    <div style="margin-top: 20px;">
+      <h3>API Configuration</h3>
+      <form onSubmit=${(e) => {
+        e.preventDefault()
+        const formData = new FormData(e.target)
+        fetch('/config/api', {
+          method: 'POST',
+          body: formData
+        }).then(() => {
+          updateMessage('API settings saved, restarting...')
+        }).catch(() => {
+          updateMessage('API configuration failed')
+        })
+      }}>
+        <input type="text" name="url" placeholder="API Base URL (e.g., https://your-domain.com)" required />
+        <input type="text" name="apiKey" placeholder="API Key (optional)" />
+        <label>
+          <input type="checkbox" name="useHttps" value="true" checked />
+          Use HTTPS
+        </label>
+        <label>
+          <input type="checkbox" name="verifyCert" value="true" />
+          Verify SSL Certificate
+        </label>
+        <button class="button" type="submit">Save API Settings</button>
+      </form>
+    </div>
+
+    <div style="margin-top: 20px;">
+      <button class="button button-outline" onClick=${() => setState('main')}>Back to Main</button>
+      <button class="button button-clear" onClick=${() => {
+        if (confirm('Are you sure you want to restart the device?')) {
+          fetch('/restart', { method: 'POST' })
+          updateMessage('Restarting device...')
+        }
+      }}>Restart Device</button>
+    </div>
   </section>
 </main>
 
