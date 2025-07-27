@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Well Pump Monitor</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300italic,700,700italic">
+    <link rel="stylesheet" href="normalize.min.css">
+    <link rel="stylesheet" href="milligram.min.css">
+    <style>
+      body { margin: 5px 15px 5px 15px; }
+      header h1 { border-bottom: 1px solid black; }
+      section { border: 1px solid #eeeeee; border-radius: 0.4em; padding: 10px; margin-bottom: 15px; }
+      section:last-of-type { margin-bottom: 0px; }
+      .hidden { display: none; }
+      .snackbar { position: fixed; right: 10px; top: 10px; padding: 5px; background-color: yellow; border-radius: 0.4em; font-weight: bold; }
+      .status-ok { color: green; font-weight: bold; }
+      .status-warning { color: orange; font-weight: bold; }
+      .status-error { color: red; font-weight: bold; }
+      .sensor-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+      .sensor-card { border: 1px solid #ddd; border-radius: 5px; padding: 10px; background-color: #f9f9f9; }
+      .sensor-value { font-size: 1.5em; font-weight: bold; }
+      .sensor-unit { font-size: 0.8em; color: #666; }
+      .event-list { max-height: 200px; overflow-y: auto; }
+      .event-item { padding: 5px; border-bottom: 1px solid #eee; }
+      .event-active { background-color: #ffe6e6; }
+      .refresh-btn { margin-left: 10px; }
+    </style>
+  </head>
+  <body>
+    <script type="module" crossorigin>
+      import { h, Component, render } from '/preact.js'
+      import { useEffect, useRef, useState } from '/preact-hooks.js'
+      import htm from '/htm.js'
+      const html = htm.bind(h)
+
+      function App() {
+        const [snackbarMessage, setSnackbarMessage] = useState(null)
+        const [sensorData, setSensorData] = useState({})
+        const [aggregatedData, setAggregatedData] = useState({})
+        const [events, setEvents] = useState([])
+        const [systemStatus, setSystemStatus] = useState({})
+        const [state, setState] = useState('main')
+        const [autoRefresh, setAutoRefresh] = useState(true)
+        
+        const timerRef = useRef()
+        const refreshIntervalRef = useRef()
+
+        const updateMessage = (message) => {
+          setSnackbarMessage(message)
+          clearTimeout(timerRef.current)
+          timerRef.current = setTimeout(() => setSnackbarMessage(null), 5000)
+        }
+
+        const fetchData = async () => {
+          try {
+            const [sensorsRes, aggregatedRes, eventsRes, statusRes] = await Promise.all([
+              fetch('/api/sensors'),
+              fetch('/api/aggregated'),
+              fetch('/api/events'),
+              fetch('/api/status')
+            ])
+            
+            if (sensorsRes.ok) setSensorData(await sensorsRes.json())
+            if (aggregatedRes.ok) setAggregatedData(await aggregatedRes.json())
+            if (eventsRes.ok) setEvents(await eventsRes.json())
+            if (statusRes.ok) setSystemStatus(await statusRes.json())
+          } catch (error) {
+            updateMessage("Failed to fetch data")
+          }
+        }
+
+        const calibrateSensors = async () => {
+          try {
+            const response = await fetch('/api/calibrate', { method: 'POST' })
+            const data = await response.json()
+            updateMessage(data.message || "Calibration started")
+          } catch (error) {
+            updateMessage("Calibration failed")
+          }
+        }
+
+        const resetAlarms = async () => {
+          try {
+            const response = await fetch('/api/reset-alarms', { method: 'POST' })
+            const data = await response.json()
+            updateMessage(data.message || "Alarms reset")
+            fetchData()
+          } catch (error) {
+            updateMessage("Reset failed")
+          }
+        }
+
+        useEffect(() => {
+          fetchData()
+          if (autoRefresh) {
+            refreshIntervalRef.current = setInterval(fetchData, 5000)
+          }
+          return () => clearInterval(refreshIntervalRef.current)
+        }, [autoRefresh])
+
+        const formatTime = (timestamp) => {
+          return new Date(timestamp).toLocaleTimeString()
+        }
+
+        const getStatusClass = (status) => {
+          if (status === 'Normal' || status === 'OK') return 'status-ok'
+          if (status === 'Warning') return 'status-warning'
+          return 'status-error'
+        }
+
+        return html`
+<header>
+  <h1>Well Pump Monitor</h1>
+  <div class="float-right">
+    <label>
+      <input type="checkbox" checked=${autoRefresh} onChange=${(e) => setAutoRefresh(e.target.checked)} />
+      Auto Refresh
+    </label>
+    <button class="button button-clear refresh-btn" onClick=${fetchData}>Refresh</button>
+  </div>
+</header>
+
+<main>
+  <section class="${state === 'main' ? '' : 'hidden'}">
+    <h2>System Status</h2>
+    <div class="sensor-grid">
+      <div class="sensor-card">
+        <div>System</div>
+        <div class="sensor-value ${getStatusClass(systemStatus.status)}">${systemStatus.status || 'Unknown'}</div>
+      </div>
+      <div class="sensor-card">
+        <div>WiFi</div>
+        <div class="sensor-value ${getStatusClass(systemStatus.wifi)}">${systemStatus.wifi || 'Unknown'}</div>
+      </div>
+      <div class="sensor-card">
+        <div>MongoDB</div>
+        <div class="sensor-value ${getStatusClass(systemStatus.mongodb)}">${systemStatus.mongodb || 'Unknown'}</div>
+      </div>
+      <div class="sensor-card">
+        <div>Uptime</div>
+        <div class="sensor-value">${systemStatus.uptime || '0'}<span class="sensor-unit">s</span></div>
+      </div>
+    </div>
+
+    <h2>Current Readings</h2>
+    <div class="sensor-grid">
+      <div class="sensor-card">
+        <div>Temperature</div>
+        <div class="sensor-value">${sensorData.temperature?.toFixed(1) || '--'}<span class="sensor-unit">°F</span></div>
+      </div>
+      <div class="sensor-card">
+        <div>Humidity</div>
+        <div class="sensor-value">${sensorData.humidity?.toFixed(1) || '--'}<span class="sensor-unit">%</span></div>
+      </div>
+      <div class="sensor-card">
+        <div>Pressure</div>
+        <div class="sensor-value">${sensorData.pressure?.toFixed(1) || '--'}<span class="sensor-unit">PSI</span></div>
+      </div>
+      <div class="sensor-card">
+        <div>Current 1</div>
+        <div class="sensor-value">${sensorData.current1?.toFixed(2) || '--'}<span class="sensor-unit">A</span></div>
+      </div>
+      <div class="sensor-card">
+        <div>Current 2</div>
+        <div class="sensor-value">${sensorData.current2?.toFixed(2) || '--'}<span class="sensor-unit">A</span></div>
+      </div>
+      <div class="sensor-card">
+        <div>Last Update</div>
+        <div class="sensor-value">${sensorData.timestamp ? formatTime(sensorData.timestamp) : '--'}</div>
+      </div>
+    </div>
+
+    <h2>Aggregated Data (Last Hour)</h2>
+    <div class="sensor-grid">
+      <div class="sensor-card">
+        <div>Temp Range</div>
+        <div class="sensor-value">${aggregatedData.tempMin?.toFixed(1) || '--'} - ${aggregatedData.tempMax?.toFixed(1) || '--'}<span class="sensor-unit">°F</span></div>
+      </div>
+      <div class="sensor-card">
+        <div>Pressure Range</div>
+        <div class="sensor-value">${aggregatedData.pressMin?.toFixed(1) || '--'} - ${aggregatedData.pressMax?.toFixed(1) || '--'}<span class="sensor-unit">PSI</span></div>
+      </div>
+      <div class="sensor-card">
+        <div>Current 1 RMS</div>
+        <div class="sensor-value">${aggregatedData.current1RMS?.toFixed(2) || '--'}<span class="sensor-unit">A</span></div>
+      </div>
+      <div class="sensor-card">
+        <div>Current 2 RMS</div>
+        <div class="sensor-value">${aggregatedData.current2RMS?.toFixed(2) || '--'}<span class="sensor-unit">A</span></div>
+      </div>
+      <div class="sensor-card">
+        <div>Duty Cycle 1</div>
+        <div class="sensor-value">${aggregatedData.dutyCycle1?.toFixed(1) || '--'}<span class="sensor-unit">%</span></div>
+      </div>
+      <div class="sensor-card">
+        <div>Duty Cycle 2</div>
+        <div class="sensor-value">${aggregatedData.dutyCycle2?.toFixed(1) || '--'}<span class="sensor-unit">%</span></div>
+      </div>
+    </div>
+
+    <h2>Active Events</h2>
+    <div class="event-list">
+      ${events.length === 0 ? html`<p>No active events</p>` : events.map(event => html`
+        <div class="event-item ${event.active ? 'event-active' : ''}">
+          <strong>${event.type}</strong> - ${event.description}
+          <br><small>Started: ${formatTime(event.startTime)}, Duration: ${Math.floor(event.duration / 1000)}s</small>
+        </div>
+      `)}
+    </div>
+
+    <div style="margin-top: 20px;">
+      <button class="button" onClick=${calibrateSensors}>Calibrate Sensors</button>
+      <button class="button button-outline" onClick=${resetAlarms} style="margin-left: 10px;">Reset Alarms</button>
+      <button class="button button-clear" onClick=${() => setState('settings')} style="margin-left: 10px;">Settings</button>
+    </div>
+  </section>
+
+  <section class="${state === 'settings' ? '' : 'hidden'}">
+    <h2>Settings</h2>
+    <p>Configuration settings will be available here.</p>
+    <button class="button button-outline" onClick=${() => setState('main')}>Back to Main</button>
+  </section>
+</main>
+
+<div class="snackbar ${snackbarMessage?.length > 0 ? '' : 'hidden'}">
+  ${snackbarMessage}
+</div>
+`
+      }
+
+      render(html`<${App}/>`, document.body)
+    </script>
+  </body>
+</html>

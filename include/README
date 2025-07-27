@@ -1,0 +1,4 @@
+This directory is intended for project header files.
+
+A header file with a .h extension contains the declarations used by the project.
+For C++, create .hpp files for C++ headers.
