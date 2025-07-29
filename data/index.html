@@ -70,15 +70,6 @@
           }
         }
 
-        const calibrateSensors = async () => {
-          try {
-            const response = await fetch('/api/calibrate', { method: 'POST' })
-            const data = await response.json()
-            updateMessage(data.message || "Calibration started")
-          } catch (error) {
-            updateMessage("Calibration failed")
-          }
-        }
 
         const resetAlarms = async () => {
           try {
@@ -210,7 +201,7 @@
     </div>
 
     <div style="margin-top: 20px;">
-      <button class="button" onClick=${calibrateSensors}>Calibrate Sensors</button>
+      <button class="button" onClick=${() => window.location.href = '/calibrate.html'}>Calibrate Sensors</button>
       <button class="button button-outline" onClick=${resetAlarms} style="margin-left: 10px;">Reset Alarms</button>
       <button class="button button-clear" onClick=${() => setState('settings')} style="margin-left: 10px;">Settings</button>
     </div>

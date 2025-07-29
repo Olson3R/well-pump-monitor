@@ -298,8 +298,17 @@ String WellPumpAPIClient::createEventJSON(const Event& event) {
 }
 
 String WellPumpAPIClient::formatTimestamp(unsigned long timestamp) {
-    // Convert milliseconds timestamp to string for API
-    return String(timestamp);
+    // Check if this looks like a unix timestamp or millis()
+    if (timestamp > 1600000000) {
+        // Looks like a unix timestamp (seconds since epoch) - convert to milliseconds
+        unsigned long long timestampMs = (unsigned long long)timestamp * 1000;
+        Serial.printf("API: Using unix timestamp %lu -> %llu ms\n", timestamp, timestampMs);
+        return String(timestampMs);
+    } else {
+        // Looks like millis() - this indicates NTP sync failed
+        Serial.printf("API: Warning - received millis timestamp %lu, NTP not synced!\n", timestamp);
+        return String(0); // Return 0 to indicate invalid timestamp
+    }
 }
 
 void WellPumpAPIClient::addToBuffer(const AggregatedData& data) {

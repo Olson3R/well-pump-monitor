@@ -41,15 +41,25 @@ public:
     bool begin();
     bool isHealthy();
     
-    bool readTemperature(float& temperature);
-    bool readHumidity(float& humidity);
-    bool readPressure(float& pressure);
-    bool readCurrent1(float& current);
-    bool readCurrent2(float& current);
+    bool readTemperature(float& temperature);  // From AHT sensor
+    bool readHumidity(float& humidity);        // From AHT sensor
+    bool readPressure(float& pressure);        // From ADC channel A2
+    bool readCurrent1(float& current);         // From ADC channel A0
+    bool readCurrent2(float& current);         // From ADC channel A1
     
     void calibratePressure(float zeroPoint, float fullScale);
     void calibrateCurrent1(float zeroPoint, float fullScale);
     void calibrateCurrent2(float zeroPoint, float fullScale);
+    
+    // Single-point calibration using known current readings
+    void calibratePressureAtValue(float knownPressure);
+    void calibrateCurrent1AtValue(float knownCurrent);
+    void calibrateCurrent2AtValue(float knownCurrent);
+    
+    // Get current raw voltage readings for calibration
+    float getRawPressureVoltage();
+    float getRawCurrent1Voltage();
+    float getRawCurrent2Voltage();
     
     void setCalibration(float pressOffset, float pressScale, 
                        float curr1Offset, float curr1Scale,

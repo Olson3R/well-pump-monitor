@@ -75,8 +75,8 @@ public:
     uint16_t getQueueSize() const;
     
 private:
-    static void collectionTaskWrapper(void* parameter);
-    static void aggregationTaskWrapper(void* parameter);
+    static void IRAM_ATTR collectionTaskWrapper(void* parameter);
+    static void IRAM_ATTR aggregationTaskWrapper(void* parameter);
     
     void collectionTaskFunction();
     void aggregationTaskFunction();
