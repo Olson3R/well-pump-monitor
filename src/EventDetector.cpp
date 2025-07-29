@@ -242,6 +242,8 @@ void EventDetector::checkSensorHealth(const SensorData& data) {
     }
 }
 
+extern unsigned long getCurrentTimestamp();
+
 void EventDetector::addEvent(EventType type, float value, float threshold, const String& description) {
     if (eventCount >= 10) {
         removeEvent(0);
@@ -251,7 +253,15 @@ void EventDetector::addEvent(EventType type, float value, float threshold, const
     event.type = type;
     event.value = value;
     event.threshold = threshold;
-    event.startTime = millis();
+    
+    // Use real timestamp if available, otherwise fall back to millis()
+    unsigned long timestamp = getCurrentTimestamp();
+    event.startTime = (timestamp > 0) ? timestamp : millis();
+    
+    // Debug timestamp usage
+    Serial.printf("Event timestamp: NTP=%lu, Final=%lu, Type=%d\n", 
+                  timestamp, event.startTime, (int)type);
+    
     event.duration = 0;
     event.active = true;
     event.description = description;

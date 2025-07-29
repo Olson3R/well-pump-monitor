@@ -16,7 +16,7 @@
 #include "SensorManager.h"
 #include "DataCollector.h"
 #include "EventDetector.h"
-#include "MongoDBClient.h"
+#include "APIClient.h"
 
 AsyncWebServer server(80);
 Preferences preferences;
@@ -51,7 +51,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &I2C_OLED, OLED_RESET);
 SensorManager* sensorManager;
 DataCollector* dataCollector;
 EventDetector* eventDetector;
-WellPumpMongoClient* mongoClient;
+WellPumpAPIClient* apiClient;
 
 const char* AP_SSID = "WellPump-Config";
 const char* AP_PASSWORD = "pumphouse";
@@ -65,10 +65,10 @@ const uint8_t LED_PIN = 2;       // Built-in LED
 
 String wifi_ssid = "";
 String wifi_password = "";
-String mongo_url = "";
-String mongo_api_key = "";
-String mongo_data_source = "";
-String mongo_database = "";
+String api_base_url = "";
+String api_key = "";
+bool api_use_https = true;
+bool api_verify_cert = false;
 
 bool wifi_connected = false;
 bool system_healthy = false;
@@ -101,12 +101,13 @@ void setupMDNS();
 void setupWebServer();
 void setupNTP();
 void setupSensors();
-void setupMongoDB();
+void setupAPI();
 void setupDisplay();
 void setupLoRa();
 void loadConfiguration();
+unsigned long getCurrentTimestamp();
 void saveWiFiCredentials(const String& ssid, const String& password);
-void saveMongoCredentials(const String& url, const String& apiKey, const String& dataSource, const String& database);
+void saveAPICredentials(const String& url, const String& apiKey, bool useHttps, bool verifyCert);
 
 void updateLED();
 void updateSystem();
@@ -120,8 +121,10 @@ void handleAPI_Status(AsyncWebServerRequest *request);
 void handleAPI_Calibrate(AsyncWebServerRequest *request);
 void handleAPI_ResetAlarms(AsyncWebServerRequest *request);
 void handleWiFiConfig(AsyncWebServerRequest *request);
-void handleMongoConfig(AsyncWebServerRequest *request);
+void handleAPIConfig(AsyncWebServerRequest *request);
 void handleRestart(AsyncWebServerRequest *request);
+
+void showBootProgress(const String& message);
 
 void setup() {
     Serial.begin(115200);
@@ -132,30 +135,55 @@ void setup() {
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, HIGH);
     
+    // Initialize display first
+    setupDisplay();
+    showBootProgress("Initializing...");
+    
+    showBootProgress("Loading SPIFFS...");
     if (!SPIFFS.begin(true)) {
         Serial.println("SPIFFS Mount Failed");
+        showBootProgress("SPIFFS Failed!");
         return;
     }
     
+    showBootProgress("Loading Config...");
     preferences.begin("pump-config", false);
     loadConfiguration();
     
+    showBootProgress("Connecting WiFi...");
     setupWiFi();
+    
+    showBootProgress("Setting up OTA...");
     setupOTA();
+    
+    showBootProgress("Starting mDNS...");
     setupMDNS();
+    
+    showBootProgress("Starting Web...");
     setupWebServer();
+    
+    showBootProgress("Setting up NTP...");
     setupNTP();
+    
+    showBootProgress("Init Sensors...");
     setupSensors();
-    setupMongoDB();
-    setupDisplay();
-    setupLoRa();
+    
+    showBootProgress("Init API Client...");
+    setupAPI();
+    
+    // showBootProgress("Init LoRa...");
+    // setupLoRa();
     
     current_led_state = LED_NORMAL;
     
+    showBootProgress("Ready!");
     Serial.println("Setup complete!");
     Serial.print("IP Address: ");
     Serial.println(WiFi.localIP());
     Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
+    
+    // Give user time to see "Ready!" message
+    delay(1000);
 }
 
 void loop() {
@@ -166,6 +194,10 @@ void loop() {
     updateDisplay();
     logData();
     
+    if (apiClient) {
+        apiClient->update();
+    }
+    
     if (WiFi.status() != WL_CONNECTED && wifi_ssid.length() > 0) {
         if (millis() - wifi_retry_timer > WIFI_RETRY_INTERVAL) {
             Serial.println("WiFi disconnected, attempting reconnection...");
@@ -174,8 +206,21 @@ void loop() {
         }
     }
     
+    // Update NTP time more frequently
+    static unsigned long lastNTPUpdate = 0;
     if (WiFi.status() == WL_CONNECTED) {
-        timeClient.update();
+        unsigned long now = millis();
+        if (now - lastNTPUpdate > 300000) { // Update every 5 minutes (more respectful)
+            bool success = timeClient.update();
+            lastNTPUpdate = now;
+            if (success) {
+                Serial.printf("NTP updated: %s (epoch: %lu)\n", 
+                             timeClient.getFormattedTime().c_str(), 
+                             timeClient.getEpochTime());
+            } else {
+                Serial.println("NTP update failed");
+            }
+        }
     }
     
     delay(100);
@@ -184,16 +229,16 @@ void loop() {
 void loadConfiguration() {
     wifi_ssid = preferences.getString("ssid", "");
     wifi_password = preferences.getString("password", "");
-    mongo_url = preferences.getString("mongo_url", "");
-    mongo_api_key = preferences.getString("mongo_api_key", "");
-    mongo_data_source = preferences.getString("mongo_data_source", "");
-    mongo_database = preferences.getString("mongo_database", "");
+    api_base_url = preferences.getString("api_url", "");
+    api_key = preferences.getString("api_key", "");
+    api_use_https = preferences.getBool("api_https", true);
+    api_verify_cert = preferences.getBool("api_verify", false);
     
     Serial.println("Loaded configuration:");
     Serial.println("WiFi SSID: " + wifi_ssid);
-    Serial.println("MongoDB URL: " + mongo_url);
-    Serial.println("MongoDB Data Source: " + mongo_data_source);
-    Serial.println("MongoDB Database: " + mongo_database);
+    Serial.println("API URL: " + api_base_url);
+    Serial.println("API HTTPS: " + String(api_use_https ? "Yes" : "No"));
+    Serial.println("API Verify Cert: " + String(api_verify_cert ? "Yes" : "No"));
 }
 
 void saveWiFiCredentials(const String& ssid, const String& password) {
@@ -204,21 +249,23 @@ void saveWiFiCredentials(const String& ssid, const String& password) {
     Serial.println("Saved WiFi credentials: " + ssid);
 }
 
-void saveMongoCredentials(const String& url, const String& apiKey, const String& dataSource, const String& database) {
-    preferences.putString("mongo_url", url);
-    preferences.putString("mongo_api_key", apiKey);
-    preferences.putString("mongo_data_source", dataSource);
-    preferences.putString("mongo_database", database);
-    mongo_url = url;
-    mongo_api_key = apiKey;
-    mongo_data_source = dataSource;
-    mongo_database = database;
-    Serial.println("Saved MongoDB credentials");
+void saveAPICredentials(const String& url, const String& apiKey, bool useHttps, bool verifyCert) {
+    preferences.putString("api_url", url);
+    preferences.putString("api_key", apiKey);
+    preferences.putBool("api_https", useHttps);
+    preferences.putBool("api_verify", verifyCert);
+    api_base_url = url;
+    api_key = apiKey;
+    api_use_https = useHttps;
+    api_verify_cert = verifyCert;
+    Serial.println("Saved API credentials");
 }
 
 void setupWiFi() {
     if (wifi_ssid.length() == 0) {
         Serial.println("No WiFi credentials, starting AP mode");
+        showBootProgress("No WiFi config");
+        delay(500);
         setupAP();
         return;
     }
@@ -230,6 +277,32 @@ void setupWiFi() {
     
     int attempts = 0;
     while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+        // Show WiFi connection progress
+        display.clearDisplay();
+        display.setTextSize(1);
+        display.setTextColor(SSD1306_WHITE);
+        display.setCursor(0, 0);
+        display.println("Well Pump Monitor");
+        display.drawLine(0, 10, 127, 10, SSD1306_WHITE);
+        
+        display.setCursor(0, 20);
+        display.println("Connecting WiFi:");
+        display.setCursor(0, 30);
+        display.println(wifi_ssid);
+        
+        // Progress dots
+        display.setCursor(0, 45);
+        for(int i = 0; i < (attempts % 4) + 1; i++) {
+            display.print(".");
+        }
+        
+        display.setCursor(0, 55);
+        display.print("Attempt ");
+        display.print(attempts + 1);
+        display.print("/20");
+        
+        display.display();
+        
         delay(1000);
         Serial.print(".");
         attempts++;
@@ -240,8 +313,31 @@ void setupWiFi() {
         Serial.println("\nWiFi connected!");
         Serial.print("IP address: ");
         Serial.println(WiFi.localIP());
+        
+        // Show WiFi connected status
+        display.clearDisplay();
+        display.setTextSize(1);
+        display.setTextColor(SSD1306_WHITE);
+        display.setCursor(0, 0);
+        display.println("Well Pump Monitor");
+        display.drawLine(0, 10, 127, 10, SSD1306_WHITE);
+        
+        display.setCursor(0, 20);
+        display.println("WiFi Connected!");
+        display.setCursor(0, 35);
+        display.print("IP: ");
+        display.println(WiFi.localIP());
+        display.setCursor(0, 50);
+        display.print("RSSI: ");
+        display.print(WiFi.RSSI());
+        display.print(" dBm");
+        
+        display.display();
+        delay(1500); // Show IP briefly
     } else {
         Serial.println("\nWiFi connection failed, starting AP mode");
+        showBootProgress("WiFi Failed!");
+        delay(1000);
         setupAP();
     }
 }
@@ -256,6 +352,28 @@ void setupAP() {
     Serial.println(IP);
     Serial.println("Connect to WiFi: " + String(AP_SSID));
     Serial.println("Password: " + String(AP_PASSWORD));
+    
+    // Show AP mode on display
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("Well Pump Monitor");
+    display.drawLine(0, 10, 127, 10, SSD1306_WHITE);
+    
+    display.setCursor(0, 20);
+    display.println("AP Mode Active");
+    display.setCursor(0, 30);
+    display.print("SSID: ");
+    display.println(AP_SSID);
+    display.setCursor(0, 40);
+    display.print("Pass: ");
+    display.println(AP_PASSWORD);
+    display.setCursor(0, 50);
+    display.print("IP: ");
+    display.println(IP);
+    
+    display.display();
 }
 
 void setupOTA() {
@@ -311,8 +429,58 @@ void setupMDNS() {
 
 void setupNTP() {
     timeClient.begin();
-    timeClient.setTimeOffset(-21600);
+    timeClient.setTimeOffset(0); // UTC time for proper Unix timestamps
+    
+    // Force initial sync if WiFi is connected
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("Synchronizing time with NTP server...");
+        Serial.println("Trying multiple NTP servers...");
+        
+        // Try multiple NTP servers
+        const char* ntpServers[] = {
+            "pool.ntp.org",
+            "time.nist.gov", 
+            "time.google.com"
+        };
+        
+        bool success = false;
+        for (int server = 0; server < 3 && !success; server++) {
+            Serial.printf("Trying NTP server: %s\n", ntpServers[server]);
+            timeClient.setPoolServerName(ntpServers[server]);
+            
+            for (int attempts = 0; attempts < 5; attempts++) {
+                if (timeClient.forceUpdate()) {
+                    success = true;
+                    Serial.printf("NTP sync successful with %s!\n", ntpServers[server]);
+                    Serial.printf("Current time: %s (epoch: %lu)\n", 
+                                 timeClient.getFormattedTime().c_str(),
+                                 timeClient.getEpochTime());
+                    break;
+                }
+                Serial.print(".");
+                delay(2000);
+            }
+        }
+        
+        if (!success) {
+            Serial.println("\nWarning: All NTP servers failed!");
+        }
+    } else {
+        Serial.println("WiFi not connected, skipping NTP sync");
+    }
+    
     Serial.println("NTP Client started");
+}
+
+unsigned long getCurrentTimestamp() {
+    if (WiFi.status() == WL_CONNECTED && timeClient.isTimeSet()) {
+        unsigned long timestamp = timeClient.getEpochTime();
+        // Debug: Show timestamp details
+        Serial.printf("NTP Time: %lu (%s)\n", timestamp, timeClient.getFormattedTime().c_str());
+        return timestamp;
+    }
+    Serial.println("Warning: NTP time not available, using millis()");
+    return 0; // Return 0 if time is not synchronized
 }
 
 void setupSensors() {
@@ -344,23 +512,26 @@ void setupSensors() {
     Serial.println("Sensors initialized successfully");
 }
 
-void setupMongoDB() {
-    if (mongo_url.length() == 0 || mongo_api_key.length() == 0) {
-        Serial.println("No MongoDB credentials, skipping initialization");
+void setupAPI() {
+    if (api_base_url.length() == 0) {
+        Serial.println("No API URL configured, skipping initialization");
         return;
     }
     
-    Serial.println("Initializing MongoDB client...");
+    Serial.println("Initializing API client...");
     
-    mongoClient = new WellPumpMongoClient(
-        mongo_url, mongo_api_key, mongo_data_source, mongo_database,
-        HOSTNAME, "Pump House"
-    );
+    APIConfig config;
+    config.baseURL = api_base_url;
+    config.apiKey = api_key;
+    config.useHttps = api_use_https;
+    config.verifyCertificate = api_verify_cert;
     
-    if (mongoClient->begin()) {
-        Serial.println("MongoDB client initialized successfully");
+    apiClient = new WellPumpAPIClient(config, HOSTNAME, "Pump House");
+    
+    if (apiClient->begin()) {
+        Serial.println("API client initialized successfully");
     } else {
-        Serial.println("MongoDB client initialization failed");
+        Serial.println("API client initialization failed");
     }
 }
 
@@ -369,11 +540,12 @@ void setupWebServer() {
     server.on("/api/aggregated", HTTP_GET, handleAPI_Aggregated);
     server.on("/api/events", HTTP_GET, handleAPI_Events);
     server.on("/api/status", HTTP_GET, handleAPI_Status);
+    server.on("/api/calibrate", HTTP_GET, handleAPI_Calibrate);
     server.on("/api/calibrate", HTTP_POST, handleAPI_Calibrate);
     server.on("/api/reset-alarms", HTTP_POST, handleAPI_ResetAlarms);
     
     server.on("/config/wifi", HTTP_POST, handleWiFiConfig);
-    server.on("/config/mongo", HTTP_POST, handleMongoConfig);
+    server.on("/config/api", HTTP_POST, handleAPIConfig);
     server.on("/restart", HTTP_POST, handleRestart);
     
     server.serveStatic("/", SPIFFS, "/").setDefaultFile("index.html");
@@ -391,8 +563,8 @@ void updateSystem() {
         eventDetector->update();
     }
     
-    if (mongoClient) {
-        mongoClient->update();
+    if (apiClient) {
+        apiClient->update();
     }
     
     system_healthy = sensorManager && sensorManager->isHealthy() && 
@@ -433,7 +605,7 @@ void updateLED() {
 }
 
 void logData() {
-    if (!mongoClient || !dataCollector) {
+    if (!apiClient || !dataCollector) {
         return;
     }
     
@@ -445,14 +617,14 @@ void logData() {
     
     AggregatedData aggregated;
     if (dataCollector->getAggregatedData(aggregated)) {
-        mongoClient->writeAggregatedData(aggregated);
+        apiClient->sendSensorData(aggregated);
     }
     
     if (eventDetector) {
         for (uint8_t i = 0; i < eventDetector->getEventCount(); i++) {
             Event event = eventDetector->getEvent(i);
             if (event.active) {
-                mongoClient->writeEvent(event);
+                apiClient->sendEvent(event);
             }
         }
     }
@@ -560,12 +732,14 @@ void handleAPI_Status(AsyncWebServerRequest *request) {
     doc["uptime"] = (millis() - startup_time) / 1000;
     doc["freeHeap"] = ESP.getFreeHeap();
     doc["time"] = timeClient.getFormattedTime();
+    doc["timeSync"] = timeClient.isTimeSet();
+    doc["epochTime"] = timeClient.getEpochTime();
     
-    if (mongoClient) {
-        doc["mongodb"] = mongoClient->getConnectionStatus();
-        doc["bufferedData"] = mongoClient->getBufferedCount();
+    if (apiClient) {
+        doc["api"] = apiClient->getConnectionStatus();
+        doc["bufferedData"] = apiClient->getBufferedCount();
     } else {
-        doc["mongodb"] = "Not Configured";
+        doc["api"] = "Not Configured";
     }
     
     doc["lora"] = lora_enabled ? "Ready" : "Disabled";
@@ -581,9 +755,54 @@ void handleAPI_Status(AsyncWebServerRequest *request) {
 }
 
 void handleAPI_Calibrate(AsyncWebServerRequest *request) {
+    if (!sensorManager) {
+        request->send(500, "application/json", "{\"error\":\"Sensor manager not initialized\"}");
+        return;
+    }
+    
     JsonDocument doc;
-    doc["message"] = "Calibration started";
-    doc["status"] = "success";
+    
+    // If it's a GET request, return current raw values for calibration
+    if (request->method() == HTTP_GET) {
+        doc["pressureRaw"] = sensorManager->getRawPressureVoltage();
+        doc["current1Raw"] = sensorManager->getRawCurrent1Voltage();
+        doc["current2Raw"] = sensorManager->getRawCurrent2Voltage();
+        doc["pressureCurrent"] = sensorManager->getPressure();
+        doc["current1Current"] = sensorManager->getCurrent1();
+        doc["current2Current"] = sensorManager->getCurrent2();
+        doc["status"] = "success";
+    }
+    // If it's a POST request, perform calibration
+    else if (request->method() == HTTP_POST) {
+        String sensor = "";
+        float value = 0.0;
+        
+        if (request->hasParam("sensor", true) && request->hasParam("value", true)) {
+            sensor = request->getParam("sensor", true)->value();
+            value = request->getParam("value", true)->value().toFloat();
+            
+            if (sensor == "pressure") {
+                sensorManager->calibratePressureAtValue(value);
+                doc["message"] = "Pressure calibrated to " + String(value) + " PSI";
+            } else if (sensor == "current1") {
+                sensorManager->calibrateCurrent1AtValue(value);
+                doc["message"] = "Current1 calibrated to " + String(value) + " A";
+            } else if (sensor == "current2") {
+                sensorManager->calibrateCurrent2AtValue(value);
+                doc["message"] = "Current2 calibrated to " + String(value) + " A";
+            } else {
+                doc["error"] = "Invalid sensor: " + sensor;
+                doc["status"] = "error";
+            }
+            
+            if (doc.containsKey("message")) {
+                doc["status"] = "success";
+            }
+        } else {
+            doc["error"] = "Missing sensor or value parameter";
+            doc["status"] = "error";
+        }
+    }
     
     String response;
     serializeJson(doc, response);
@@ -612,15 +831,17 @@ void handleWiFiConfig(AsyncWebServerRequest *request) {
     ESP.restart();
 }
 
-void handleMongoConfig(AsyncWebServerRequest *request) {
+void handleAPIConfig(AsyncWebServerRequest *request) {
     String url = request->getParam("url", true)->value();
     String apiKey = request->getParam("apiKey", true)->value();
-    String dataSource = request->getParam("dataSource", true)->value();
-    String database = request->getParam("database", true)->value();
+    bool useHttps = request->hasParam("useHttps", true) ? 
+                   (request->getParam("useHttps", true)->value() == "true") : true;
+    bool verifyCert = request->hasParam("verifyCert", true) ? 
+                     (request->getParam("verifyCert", true)->value() == "true") : false;
     
-    saveMongoCredentials(url, apiKey, dataSource, database);
+    saveAPICredentials(url, apiKey, useHttps, verifyCert);
     
-    request->send(200, "application/json", "{\"status\":\"MongoDB credentials saved. Restarting...\"}");
+    request->send(200, "application/json", "{\"status\":\"API credentials saved. Restarting...\"}");
     
     delay(2000);
     ESP.restart();
@@ -643,15 +864,54 @@ void setupDisplay() {
         return;
     }
     
+    // Clear display and show boot screen
     display.clearDisplay();
-    display.setTextSize(1);
+    display.setTextSize(2);
     display.setTextColor(SSD1306_WHITE);
     display.setCursor(0, 0);
-    display.println("Pump Monitor");
-    display.println("Starting...");
+    display.println("Well Pump");
+    display.println("Monitor");
+    
+    display.setTextSize(1);
+    display.setCursor(0, 40);
+    display.println("Version 1.0");
+    display.setCursor(0, 50);
+    display.println("Booting...");
     display.display();
     
     Serial.println("OLED display initialized");
+    delay(500); // Brief pause to show boot screen
+}
+
+void showBootProgress(const String& message) {
+    display.clearDisplay();
+    
+    // Title
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("Well Pump Monitor");
+    display.drawLine(0, 10, 127, 10, SSD1306_WHITE);
+    
+    // Boot status
+    display.setCursor(0, 20);
+    display.println("Booting:");
+    
+    // Current operation
+    display.setCursor(0, 35);
+    display.setTextSize(1);
+    display.println(message);
+    
+    // Progress indicator (animated dots)
+    static int dots = 0;
+    display.setCursor(0, 50);
+    for(int i = 0; i < (dots % 4); i++) {
+        display.print(".");
+    }
+    dots++;
+    
+    display.display();
+    delay(100); // Small delay to make progress visible
 }
 
 void updateDisplay() {
@@ -670,13 +930,15 @@ void updateDisplay() {
     display.println("Well Pump Monitor");
     display.println("----------------");
     
-    // System Status
-    String status = system_healthy ? "Status: OK" : "Status: ERROR";
-    display.println(status);
+    // Only show system status if not healthy
+    if (!system_healthy) {
+        display.println("Status: ERROR");
+    }
     
-    // WiFi Status
-    String wifi_status = wifi_connected ? "WiFi: Connected" : "WiFi: Disconnected";
-    display.println(wifi_status);
+    // Only show WiFi status if disconnected
+    if (!wifi_connected) {
+        display.println("WiFi: Disconnected");
+    }
     
     // Current sensor data
     if (dataCollector) {
@@ -685,6 +947,10 @@ void updateDisplay() {
             display.print("Temp: ");
             display.print(data.temperature, 1);
             display.println("C");
+            
+            display.print("Pressure: ");
+            display.print(data.pressure, 1);
+            display.println(" PSI");
             
             display.print("Current1: ");
             display.println(data.current1, 2);

@@ -3,12 +3,18 @@
 SensorManager::SensorManager(TwoWire* wire) 
     : aht(), ads(), wireInstance(wire)
 {
-    pressureOffset = 0.0;
-    pressureScale = 1.0;
-    current1Offset = 0.0;
-    current1Scale = 1.0;
-    current2Offset = 0.0;
-    current2Scale = 1.0;
+    // Pressure sensor calibration: 0.5V-4.5V = 0-100 PSI (typical 4-20mA pressure transducer)
+    // Connected to ADC channel A2
+    pressureOffset = 0.5;  // 0.5V = 0 PSI
+    pressureScale = 25.0;  // (100 PSI / 4.0V) = 25 PSI/V
+    
+    // Current sensor calibration: Assuming 2.5V = 0A, 30A/V sensitivity (typical Hall effect sensor)
+    // Current sensor 1 connected to ADC channel A0
+    // Current sensor 2 connected to ADC channel A1
+    current1Offset = 2.5;  // 2.5V = 0A (center bias)
+    current1Scale = 30.0;  // 30A per volt
+    current2Offset = 2.5;  // 2.5V = 0A (center bias)
+    current2Scale = 30.0;  // 30A per volt
     
     ahtInitialized = false;
     adsInitialized = false;
@@ -112,16 +118,23 @@ bool SensorManager::readPressure(float& pressure) {
     unsigned long now = millis();
     if (now - lastPressureRead < PRESSURE_READ_INTERVAL) {
         pressure = lastPressure;
+        Serial.printf("Pressure: Using cached value %.1f PSI\n", pressure);
         return true;
     }
     
     if (!adsInitialized) return false;
     
-    float rawValue = readADSChannel(0);
+    float rawValue = readADSChannel(2);  // Pressure sensor connected to A2
     if (rawValue < 0) return false;
     
     float pressureValue = (rawValue - pressureOffset) * pressureScale;
+    
+    // Debug output for pressure calibration
+    Serial.printf("Pressure: Raw=%.3fV, Calculated=%.1fPSI (offset=%.1f, scale=%.1f)\n", 
+                  rawValue, pressureValue, pressureOffset, pressureScale);
+    
     if (!validatePressure(pressureValue)) {
+        Serial.printf("Pressure validation failed: %.1f PSI (range: 0-150)\n", pressureValue);
         return false;
     }
     
@@ -135,16 +148,23 @@ bool SensorManager::readCurrent1(float& current) {
     unsigned long now = millis();
     if (now - lastCurrentRead < CURRENT_READ_INTERVAL) {
         current = lastCurrent1;
+        Serial.printf("Current1: Using cached value %.2f A\n", current);
         return true;
     }
     
     if (!adsInitialized) return false;
     
-    float rawValue = readADSChannel(1);
+    float rawValue = readADSChannel(0);  // Current sensor 1 connected to A0
     if (rawValue < 0) return false;
     
     float currentValue = (rawValue - current1Offset) * current1Scale;
+    
+    // Debug output for current1 calibration
+    Serial.printf("Current1: Raw=%.3fV, Calculated=%.2fA (offset=%.1f, scale=%.1f)\n", 
+                  rawValue, currentValue, current1Offset, current1Scale);
+    
     if (!validateCurrent(currentValue)) {
+        Serial.printf("Current1 validation failed: %.2f A (range: 0-50)\n", currentValue);
         return false;
     }
     
@@ -157,11 +177,17 @@ bool SensorManager::readCurrent1(float& current) {
 bool SensorManager::readCurrent2(float& current) {
     if (!adsInitialized) return false;
     
-    float rawValue = readADSChannel(2);
+    float rawValue = readADSChannel(1);  // Current sensor 2 connected to A1
     if (rawValue < 0) return false;
     
     float currentValue = (rawValue - current2Offset) * current2Scale;
+    
+    // Debug output for current2 calibration
+    Serial.printf("Current2: Raw=%.3fV, Calculated=%.2fA (offset=%.1f, scale=%.1f)\n", 
+                  rawValue, currentValue, current2Offset, current2Scale);
+    
     if (!validateCurrent(currentValue)) {
+        Serial.printf("Current2 validation failed: %.2f A (range: 0-50)\n", currentValue);
         return false;
     }
     
@@ -208,7 +234,12 @@ float SensorManager::readADSChannel(uint8_t channel) {
         default: return -1.0;
     }
     
-    return ads.computeVolts(rawValue);
+    float voltage = ads.computeVolts(rawValue);
+    
+    // Debug: Show raw ADC values and computed voltage
+    Serial.printf("ADC Ch%d: Raw=%d, Voltage=%.3fV\n", channel, rawValue, voltage);
+    
+    return voltage;
 }
 
 bool SensorManager::validateTemperature(float temp) {
@@ -224,5 +255,68 @@ bool SensorManager::validatePressure(float pressure) {
 }
 
 bool SensorManager::validateCurrent(float current) {
-    return (current >= 0.0 && current <= 50.0);
+    // Allow negative values for bidirectional current sensors (Hall effect)
+    return (current >= -50.0 && current <= 50.0);
+}
+
+// Single-point calibration functions
+void SensorManager::calibratePressureAtValue(float knownPressure) {
+    float rawVoltage = getRawPressureVoltage();
+    if (rawVoltage > 0) {
+        if (knownPressure == 0.0) {
+            // Zero calibration - set offset
+            pressureOffset = rawVoltage;
+            Serial.printf("Pressure zero calibrated: offset=%.3fV\n", pressureOffset);
+        } else {
+            // Single-point calibration - calculate scale factor
+            pressureScale = knownPressure / (rawVoltage - pressureOffset);
+            Serial.printf("Pressure calibrated: %.1f PSI at %.3fV, scale=%.1f\n", 
+                         knownPressure, rawVoltage, pressureScale);
+        }
+    }
+}
+
+void SensorManager::calibrateCurrent1AtValue(float knownCurrent) {
+    float rawVoltage = getRawCurrent1Voltage();
+    if (rawVoltage > 0) {
+        if (knownCurrent == 0.0) {
+            // Zero calibration - set offset
+            current1Offset = rawVoltage;
+            Serial.printf("Current1 zero calibrated: offset=%.3fV\n", current1Offset);
+        } else {
+            // Single-point calibration - calculate scale factor
+            current1Scale = knownCurrent / (rawVoltage - current1Offset);
+            Serial.printf("Current1 calibrated: %.2f A at %.3fV, scale=%.1f\n", 
+                         knownCurrent, rawVoltage, current1Scale);
+        }
+    }
+}
+
+void SensorManager::calibrateCurrent2AtValue(float knownCurrent) {
+    float rawVoltage = getRawCurrent2Voltage();
+    if (rawVoltage > 0) {
+        if (knownCurrent == 0.0) {
+            // Zero calibration - set offset
+            current2Offset = rawVoltage;
+            Serial.printf("Current2 zero calibrated: offset=%.3fV\n", current2Offset);
+        } else {
+            // Single-point calibration - calculate scale factor
+            current2Scale = knownCurrent / (rawVoltage - current2Offset);
+            Serial.printf("Current2 calibrated: %.2f A at %.3fV, scale=%.2f\n", 
+                         knownCurrent, rawVoltage, current2Scale);
+        }
+    }
+}
+
+// Get raw voltage readings for calibration
+float SensorManager::getRawPressureVoltage() {
+    return readADSChannel(2);
+}
+
+float SensorManager::getRawCurrent1Voltage() {
+    return readADSChannel(0);
+}
+
+float SensorManager::getRawCurrent2Voltage() {
+    return readADSChannel(1);
 }

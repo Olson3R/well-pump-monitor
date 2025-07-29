@@ -37,12 +37,25 @@ DataCollector::~DataCollector() {
 bool DataCollector::begin() {
     if (running) return true;
     
+    // Validate that object is properly initialized
+    if (!sensorManager) {
+        Serial.println("ERROR: SensorManager is null in DataCollector::begin()");
+        return false;
+    }
+    
+    if (!tempFilter || !humFilter || !pressFilter || !current1Filter || !current2Filter) {
+        Serial.println("ERROR: One or more filters is null in DataCollector::begin()");
+        return false;
+    }
+    
+    Serial.println("Creating data queue...");
     dataQueue = xQueueCreate(QUEUE_SIZE, sizeof(SensorData));
     if (dataQueue == NULL) {
         Serial.println("Failed to create data queue");
         return false;
     }
     
+    Serial.println("Creating data mutex...");
     dataMutex = xSemaphoreCreateMutex();
     if (dataMutex == NULL) {
         Serial.println("Failed to create data mutex");
@@ -50,32 +63,36 @@ bool DataCollector::begin() {
         return false;
     }
     
+    Serial.println("Creating collection task...");
     BaseType_t result1 = xTaskCreate(
         collectionTaskWrapper,
         "DataCollection",
-        4096,
+        8192,
         this,
         2,
         &collectionTask
     );
     
+    Serial.println("Creating aggregation task...");
     BaseType_t result2 = xTaskCreate(
         aggregationTaskWrapper,
         "DataAggregation",
-        4096,
+        8192,
         this,
         1,
         &aggregationTask
     );
     
     if (result1 != pdPASS || result2 != pdPASS) {
-        Serial.println("Failed to create tasks");
+        Serial.printf("Failed to create tasks: result1=%d, result2=%d\n", result1, result2);
         stop();
         return false;
     }
     
     running = true;
-    lastAggregationTime = millis();
+    extern unsigned long getCurrentTimestamp();
+    unsigned long timestamp = getCurrentTimestamp();
+    lastAggregationTime = (timestamp > 0) ? timestamp : millis();
     
     Serial.println("DataCollector started successfully");
     return true;
@@ -143,13 +160,43 @@ uint16_t DataCollector::getQueueSize() const {
     return uxQueueMessagesWaiting(dataQueue);
 }
 
-void DataCollector::collectionTaskWrapper(void* parameter) {
+void IRAM_ATTR DataCollector::collectionTaskWrapper(void* parameter) {
+    if (parameter == nullptr) {
+        Serial.println("ERROR: Null parameter in collectionTaskWrapper!");
+        vTaskDelete(NULL);
+        return;
+    }
+    
     DataCollector* collector = static_cast<DataCollector*>(parameter);
+    if (collector == nullptr) {
+        Serial.println("ERROR: Failed to cast parameter!");
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    // Small delay to ensure everything is initialized
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
     collector->collectionTaskFunction();
 }
 
-void DataCollector::aggregationTaskWrapper(void* parameter) {
+void IRAM_ATTR DataCollector::aggregationTaskWrapper(void* parameter) {
+    if (parameter == nullptr) {
+        Serial.println("ERROR: Null parameter in aggregationTaskWrapper!");
+        vTaskDelete(NULL);
+        return;
+    }
+    
     DataCollector* collector = static_cast<DataCollector*>(parameter);
+    if (collector == nullptr) {
+        Serial.println("ERROR: Failed to cast parameter!");
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    // Small delay to ensure everything is initialized
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
     collector->aggregationTaskFunction();
 }
 
@@ -171,7 +218,9 @@ void DataCollector::aggregationTaskFunction() {
         unsigned long now = millis();
         if (now - lastAggregationTime >= AGGREGATION_INTERVAL) {
             aggregateData();
-            lastAggregationTime = now;
+            extern unsigned long getCurrentTimestamp();
+            unsigned long timestamp = getCurrentTimestamp();
+            lastAggregationTime = (timestamp > 0) ? timestamp : now;
         }
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
@@ -183,7 +232,9 @@ void DataCollector::collectSensorData() {
     }
     
     SensorData data;
-    data.timestamp = millis();
+    extern unsigned long getCurrentTimestamp();
+    unsigned long timestamp = getCurrentTimestamp();
+    data.timestamp = (timestamp > 0) ? timestamp : millis();
     data.valid = true;
     
     bool tempOk = sensorManager->readTemperature(data.temperature);
@@ -218,8 +269,16 @@ void DataCollector::aggregateData() {
     }
     
     AggregatedData aggregated;
-    aggregated.startTime = lastAggregationTime;
-    aggregated.endTime = millis();
+    extern unsigned long getCurrentTimestamp();
+    unsigned long currentTime = getCurrentTimestamp();
+    if (currentTime > 0) {
+        aggregated.startTime = lastAggregationTime > 1600000000 ? lastAggregationTime : currentTime;
+        aggregated.endTime = currentTime;
+    } else {
+        // Fallback to millis if NTP not available
+        aggregated.startTime = lastAggregationTime;
+        aggregated.endTime = millis();
+    }
     aggregated.sampleCount = min(tempFilter->getSampleCount(), current1Filter->getSampleCount());
     
     aggregated.tempMin = tempFilter->getMin();
