@@ -38,6 +38,7 @@ private:
     unsigned long lastRetryTime;
     uint16_t retryCount;
     uint16_t maxRetries;
+    int lastHttpStatusCode;
     
     static const uint16_t BUFFER_SIZE = 20;
     static const unsigned long CONNECTION_TEST_INTERVAL = 30000;
@@ -80,6 +81,7 @@ public:
     uint8_t getBufferedCount() const { return bufferedCount; }
     bool isConnected() const { return connected; }
     bool isInitialized() const { return initialized; }
+    int getLastHttpStatusCode() const { return lastHttpStatusCode; }
     
 private:
     // HTTP request methods

@@ -78,11 +78,17 @@ unsigned long led_timer = 0;
 unsigned long data_log_timer = 0;
 unsigned long display_update_timer = 0;
 unsigned long startup_time = 0;
+unsigned long last_data_send_time = 0;
+unsigned long last_send_attempt_time = 0;
+bool last_send_success = false;
+uint32_t send_error_count = 0;
+int last_http_status_code = -1;
 
-const unsigned long WIFI_RETRY_INTERVAL = 30000;
+const unsigned long WIFI_RETRY_INTERVAL = 120000;  // 2 minutes
 const unsigned long LED_UPDATE_INTERVAL = 500;
 const unsigned long DATA_LOG_INTERVAL = 60000;
 const unsigned long DISPLAY_UPDATE_INTERVAL = 2000;
+const unsigned long PAGE_SWITCH_INTERVAL = 5000;  // Switch pages every 5 seconds
 
 enum LEDState {
     LED_BOOT,
@@ -93,6 +99,7 @@ enum LEDState {
 
 LEDState current_led_state = LED_BOOT;
 bool led_on = false;
+uint8_t current_display_page = 0;
 
 void setupWiFi();
 void setupAP();
@@ -271,12 +278,18 @@ void setupWiFi() {
     }
     
     Serial.println("Connecting to WiFi: " + wifi_ssid);
-    WiFi.mode(WIFI_STA);
+    // Use AP+STA mode to keep config portal accessible
+    WiFi.mode(WIFI_AP_STA);
     WiFi.setHostname(HOSTNAME);
+    
+    // Ensure AP stays active with same credentials
+    WiFi.softAP(AP_SSID, AP_PASSWORD, 6, 0, 4);
+    
+    // Now try to connect as station
     WiFi.begin(wifi_ssid.c_str(), wifi_password.c_str());
     
     int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    while (WiFi.status() != WL_CONNECTED && attempts < 5) {
         // Show WiFi connection progress
         display.clearDisplay();
         display.setTextSize(1);
@@ -343,12 +356,34 @@ void setupWiFi() {
 }
 
 void setupAP() {
+    // Disconnect and clear any previous WiFi settings
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    delay(100);
+    
+    // Configure AP+STA mode to allow both AP and station
     WiFi.mode(WIFI_AP_STA);
-    WiFi.softAP(AP_SSID, AP_PASSWORD);
+    
+    // Set up AP with explicit configuration
+    IPAddress local_IP(192, 168, 4, 1);
+    IPAddress gateway(192, 168, 4, 1);
+    IPAddress subnet(255, 255, 255, 0);
+    
+    // Configure AP settings before starting
+    WiFi.softAPConfig(local_IP, gateway, subnet);
+    
+    // Start AP with channel 6 and show SSID
+    bool ap_started = WiFi.softAP(AP_SSID, AP_PASSWORD, 6, 0, 4);
     wifi_connected = false;
     
+    if (!ap_started) {
+        Serial.println("ERROR: Failed to start AP mode!");
+        ESP.restart();
+    }
+    
     IPAddress IP = WiFi.softAPIP();
-    Serial.print("AP IP address: ");
+    Serial.print("AP Started Successfully!");
+    Serial.print("\nAP IP address: ");
     Serial.println(IP);
     Serial.println("Connect to WiFi: " + String(AP_SSID));
     Serial.println("Password: " + String(AP_PASSWORD));
@@ -532,6 +567,31 @@ void setupAPI() {
         Serial.println("API client initialized successfully");
     } else {
         Serial.println("API client initialization failed");
+        Serial.print("Connection test failed. HTTP status: ");
+        Serial.println(apiClient->getLastHttpStatusCode());
+        Serial.println("Check API URL, network connectivity, and server status");
+        
+        // Test basic connectivity
+        Serial.println("Testing basic connectivity...");
+        HTTPClient testHttp;
+        testHttp.begin("http://httpbin.org/get");
+        int testCode = testHttp.GET();
+        Serial.print("HTTP test to httpbin.org: ");
+        Serial.println(testCode);
+        testHttp.end();
+        
+        // Test HTTPS connectivity
+        WiFiClientSecure testSecure;
+        testSecure.setInsecure();
+        HTTPClient testHttps;
+        testHttps.begin(testSecure, "https://httpbin.org/get");
+        int testHttpsCode = testHttps.GET();
+        Serial.print("HTTPS test to httpbin.org: ");
+        Serial.println(testHttpsCode);
+        testHttps.end();
+        
+        // Still keep the client for later retry attempts
+        // Don't set apiClient = nullptr here so it can retry
     }
 }
 
@@ -605,7 +665,18 @@ void updateLED() {
 }
 
 void logData() {
-    if (!apiClient || !dataCollector) {
+    if (!dataCollector) {
+        return;
+    }
+    
+    if (!apiClient) {
+        // Update tracking variables to show API not configured
+        static unsigned long last_no_api_log = 0;
+        unsigned long now = millis();
+        if (now - last_no_api_log > 60000) { // Log once per minute
+            Serial.println("API client not configured - no data sending");
+            last_no_api_log = now;
+        }
         return;
     }
     
@@ -616,8 +687,24 @@ void logData() {
     data_log_timer = now;
     
     AggregatedData aggregated;
+    Serial.println("=== ATTEMPTING DATA SEND ===");
     if (dataCollector->getAggregatedData(aggregated)) {
-        apiClient->sendSensorData(aggregated);
+        Serial.println("Got aggregated data, attempting to send...");
+        last_send_attempt_time = millis();
+        if (apiClient->sendSensorData(aggregated)) {
+            last_data_send_time = millis();
+            last_send_success = true;
+            last_http_status_code = apiClient->getLastHttpStatusCode();
+            Serial.println("Data sent successfully!");
+        } else {
+            last_send_success = false;
+            send_error_count++;
+            last_http_status_code = apiClient->getLastHttpStatusCode();
+            Serial.print("ERROR: Failed to send sensor data to server. HTTP code: ");
+            Serial.println(last_http_status_code);
+        }
+    } else {
+        Serial.println("WARNING: No aggregated data available to send");
     }
     
     if (eventDetector) {
@@ -921,48 +1008,156 @@ void updateDisplay() {
     }
     display_update_timer = now;
     
+    // Switch pages every PAGE_SWITCH_INTERVAL
+    static unsigned long page_switch_timer = 0;
+    if (now - page_switch_timer > PAGE_SWITCH_INTERVAL) {
+        current_display_page = (current_display_page + 1) % 2;
+        page_switch_timer = now;
+    }
+    
     display.clearDisplay();
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
     display.setCursor(0, 0);
     
-    // Title
-    display.println("Well Pump Monitor");
-    display.println("----------------");
+    // Title with page indicator
+    display.print("Well Pump Monitor ");
+    display.print(current_display_page + 1);
+    display.println("/2");
+    display.drawLine(0, 10, 127, 10, SSD1306_WHITE);
     
-    // Only show system status if not healthy
-    if (!system_healthy) {
-        display.println("Status: ERROR");
-    }
-    
-    // Only show WiFi status if disconnected
-    if (!wifi_connected) {
-        display.println("WiFi: Disconnected");
-    }
-    
-    // Current sensor data
-    if (dataCollector) {
-        SensorData data;
-        if (dataCollector->getCurrentData(data)) {
-            display.print("Temp: ");
-            display.print(data.temperature, 1);
-            display.println("C");
-            
-            display.print("Pressure: ");
-            display.print(data.pressure, 1);
-            display.println(" PSI");
-            
-            display.print("Current1: ");
-            display.println(data.current1, 2);
-            
-            display.print("Current2: ");
-            display.println(data.current2, 2);
+    if (current_display_page == 0) {
+        // Page 1: Sensor Data and Status
+        display.setCursor(0, 15);
+        
+        // Only show system status if not healthy
+        if (!system_healthy) {
+            display.println("Status: ERROR");
         }
-    }
-    
-    // Events/Alerts
-    if (eventDetector && eventDetector->hasActiveEvents()) {
-        display.println("*** ALERTS ACTIVE ***");
+        
+        // Only show WiFi status if disconnected
+        if (!wifi_connected) {
+            display.println("WiFi: Disconnected");
+        }
+        
+        // Current sensor data
+        if (dataCollector) {
+            SensorData data;
+            if (dataCollector->getCurrentData(data)) {
+                display.print("Temp: ");
+                display.print(data.temperature, 1);
+                display.println("C");
+                
+                display.print("Pressure: ");
+                display.print(data.pressure, 1);
+                display.println(" PSI");
+                
+                display.print("Current1: ");
+                display.println(data.current1, 2);
+                
+                display.print("Current2: ");
+                display.println(data.current2, 2);
+            }
+        }
+        
+        // Events/Alerts
+        if (eventDetector && eventDetector->hasActiveEvents()) {
+            display.println("*** ALERTS ACTIVE ***");
+        }
+    } else {
+        // Page 2: System Info
+        display.setCursor(0, 15);
+        
+        // Current date and time
+        if (WiFi.status() == WL_CONNECTED && timeClient.isTimeSet()) {
+            unsigned long epochTime = timeClient.getEpochTime();
+            struct tm *ptm = gmtime((time_t *)&epochTime);
+            
+            display.printf("Date: %02d/%02d/%04d\n", 
+                          ptm->tm_mon + 1, ptm->tm_mday, ptm->tm_year + 1900);
+            display.print("Time: ");
+            display.println(timeClient.getFormattedTime());
+        } else {
+            display.println("Date: No sync");
+            display.println("Time: No sync");
+        }
+        
+        // Current IP address
+        if (wifi_connected) {
+            display.print("IP: ");
+            display.println(WiFi.localIP());
+        } else {
+            display.println("IP: Not connected");
+        }
+        
+        // Last data send status
+        if (!apiClient) {
+            display.println("Send: No API config");
+        } else if (!apiClient->isInitialized() || !apiClient->isConnected()) {
+            display.print("Send: API error (");
+            display.print(apiClient->getLastHttpStatusCode());
+            display.println(")");
+        } else if (last_send_attempt_time > 0) {
+            if (last_send_success && last_data_send_time > 0) {
+                unsigned long time_since_send = (now - last_data_send_time) / 1000;
+                display.print("Send: ");
+                if (time_since_send < 60) {
+                    display.print(time_since_send);
+                    display.print("s ago OK");
+                } else if (time_since_send < 3600) {
+                    display.print(time_since_send / 60);
+                    display.print("m ago OK");
+                } else {
+                    display.print(time_since_send / 3600);
+                    display.print("h ago OK");
+                }
+                if (last_http_status_code > 0) {
+                    display.print(" (");
+                    display.print(last_http_status_code);
+                    display.println(")");
+                } else {
+                    display.println();
+                }
+            } else {
+                display.print("Send: FAILED");
+                if (last_http_status_code > 0) {
+                    display.print(" (");
+                    display.print(last_http_status_code);
+                    display.println(")");
+                } else {
+                    display.println();
+                }
+            }
+            
+            // Show error count if there are any errors
+            if (send_error_count > 0) {
+                display.print("Send errors: ");
+                display.println(send_error_count);
+            }
+        } else {
+            display.println("Last send: Never");
+        }
+        
+        // Uptime
+        unsigned long uptime_seconds = (now - startup_time) / 1000;
+        display.print("Uptime: ");
+        if (uptime_seconds < 60) {
+            display.print(uptime_seconds);
+            display.println("s");
+        } else if (uptime_seconds < 3600) {
+            display.print(uptime_seconds / 60);
+            display.println("m");
+        } else {
+            display.print(uptime_seconds / 3600);
+            display.print("h ");
+            display.print((uptime_seconds % 3600) / 60);
+            display.println("m");
+        }
+        
+        // Free heap
+        display.print("Free RAM: ");
+        display.print(ESP.getFreeHeap() / 1024);
+        display.println("KB");
     }
     
     display.display();

@@ -51,10 +51,12 @@ private:
     
     bool running;
     unsigned long lastAggregationTime;
+    unsigned long lastQueueProcessTime;
     
     static const uint16_t QUEUE_SIZE = 100;
     static const uint16_t FILTER_SIZE = 20;
-    static const unsigned long AGGREGATION_INTERVAL = 60000;
+    static const unsigned long AGGREGATION_INTERVAL = 60000;  // Aggregate over 60-second windows
+    static const unsigned long QUEUE_PROCESS_INTERVAL = 1000;  // Process queue every 1 second
     
     float currentThreshold1;
     float currentThreshold2;
@@ -82,6 +84,7 @@ private:
     void aggregationTaskFunction();
     
     void collectSensorData();
+    void processQueueData();
     void aggregateData();
     
     float calculateDutyCycle(NoiseFilter* filter, float threshold);

@@ -16,6 +16,7 @@ WellPumpAPIClient::WellPumpAPIClient(const APIConfig& config, const String& devi
     lastRetryTime = 0;
     retryCount = 0;
     maxRetries = 3;
+    lastHttpStatusCode = -1;
     
     bufferSize = BUFFER_SIZE;
     buffer = new DataBuffer[bufferSize];
@@ -114,7 +115,27 @@ bool WellPumpAPIClient::testConnection() {
     // Test connection with health endpoint
     String url = baseURL + "/api/health";
     
+    // Print connection test details
+    Serial.println("=== CONNECTION TEST ===");
+    Serial.println("URL: " + url);
+    Serial.println("HTTPS: " + String(useHttps ? "Yes" : "No"));
+    Serial.println("Verify Cert: " + String(verifyCertificate ? "Yes" : "No"));
+    Serial.println("=======================");
+    
     if (useHttps && secureClient) {
+        Serial.println("Attempting HTTPS connection...");
+        Serial.print("Free heap before connection: ");
+        Serial.println(ESP.getFreeHeap());
+        
+        // Try to connect manually first to get better error info
+        if (!secureClient->connect("well.spidermo.net", 443)) {
+            Serial.println("SSL connection failed!");
+            httpClient->end();
+            return false;
+        }
+        Serial.println("SSL handshake successful");
+        secureClient->stop();
+        
         httpClient->begin(*secureClient, url);
     } else {
         httpClient->begin(url);
@@ -125,20 +146,38 @@ bool WellPumpAPIClient::testConnection() {
         httpClient->addHeader("Authorization", "Bearer " + apiKey);
     }
     
-    int httpResponseCode = httpClient->GET();
+    // Enable redirect following and add timeout
+    httpClient->setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    httpClient->setTimeout(10000); // 10 second timeout
     
-    connected = (httpResponseCode == 200);
+    Serial.println("Making GET request...");
+    int httpResponseCode = httpClient->GET();
+    Serial.print("Received response code: ");
+    Serial.println(httpResponseCode);
+    
+    lastHttpStatusCode = httpResponseCode;
+    connected = (httpResponseCode >= 200 && httpResponseCode < 300);
     lastConnectionTest = now;
     
     if (connected) {
         Serial.println("API Client: Connection test successful");
+        Serial.print("HTTP Status: ");
+        Serial.println(httpResponseCode);
+        if (httpResponseCode >= 200 && httpResponseCode < 300) {
+            String response = httpClient->getString();
+            if (response.length() > 0 && response.length() < 500) {
+                Serial.println("Response: " + response);
+            }
+        }
         resetRetryCount();
     } else {
         Serial.print("API Client: Connection test failed. HTTP code: ");
         Serial.println(httpResponseCode);
         if (httpResponseCode > 0) {
             String response = httpClient->getString();
-            Serial.println("Response: " + response);
+            if (response.length() > 0 && response.length() < 500) {
+                Serial.println("Response: " + response);
+            }
         }
     }
     
@@ -196,6 +235,22 @@ bool WellPumpAPIClient::makeRequest(const String& endpoint, const String& method
     
     String url = baseURL + endpoint;
     
+    // Print request details
+    Serial.println("=== API REQUEST ===");
+    Serial.println("Method: " + method);
+    Serial.println("URL: " + url);
+    Serial.println("HTTPS: " + String(useHttps ? "Yes" : "No"));
+    Serial.println("Verify Cert: " + String(verifyCertificate ? "Yes" : "No"));
+    if (apiKey.length() > 0) {
+        Serial.println("API Key: [PRESENT]");
+    } else {
+        Serial.println("API Key: [NOT SET]");
+    }
+    if (payload.length() > 0) {
+        Serial.println("Payload: " + payload);
+    }
+    Serial.println("==================");
+    
     if (useHttps && secureClient) {
         httpClient->begin(*secureClient, url);
     } else {
@@ -207,16 +262,26 @@ bool WellPumpAPIClient::makeRequest(const String& endpoint, const String& method
         httpClient->addHeader("Authorization", "Bearer " + apiKey);
     }
     
+    // Enable redirect following and add timeout
+    httpClient->setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    httpClient->setTimeout(10000); // 10 second timeout
+    
     int httpResponseCode;
     if (method == "POST") {
+        Serial.println("Making POST request...");
         httpResponseCode = httpClient->POST(payload);
     } else if (method == "GET") {
+        Serial.println("Making GET request...");
         httpResponseCode = httpClient->GET();
     } else {
         httpClient->end();
         return false;
     }
     
+    Serial.print("Received response code: ");
+    Serial.println(httpResponseCode);
+    
+    lastHttpStatusCode = httpResponseCode;
     bool success = (httpResponseCode == 200 || httpResponseCode == 201);
     
     if (!success) {

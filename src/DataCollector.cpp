@@ -16,6 +16,7 @@ DataCollector::DataCollector(SensorManager* sensorMgr) {
     
     running = false;
     lastAggregationTime = 0;
+    lastQueueProcessTime = 0;
     
     currentThreshold1 = 0.5;
     currentThreshold2 = 0.5;
@@ -79,7 +80,7 @@ bool DataCollector::begin() {
         "DataAggregation",
         8192,
         this,
-        1,
+        4,  // Much higher priority than collection task
         &aggregationTask
     );
     
@@ -90,9 +91,8 @@ bool DataCollector::begin() {
     }
     
     running = true;
-    extern unsigned long getCurrentTimestamp();
-    unsigned long timestamp = getCurrentTimestamp();
-    lastAggregationTime = (timestamp > 0) ? timestamp : millis();
+    lastAggregationTime = millis();
+    lastQueueProcessTime = millis();
     
     Serial.println("DataCollector started successfully");
     return true;
@@ -212,16 +212,26 @@ void DataCollector::collectionTaskFunction() {
 
 void DataCollector::aggregationTaskFunction() {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xFrequency = pdMS_TO_TICKS(10000);
+    const TickType_t xFrequency = pdMS_TO_TICKS(100);  // Run every 100ms instead of 10s
     
     while (running) {
         unsigned long now = millis();
-        if (now - lastAggregationTime >= AGGREGATION_INTERVAL) {
-            aggregateData();
-            extern unsigned long getCurrentTimestamp();
-            unsigned long timestamp = getCurrentTimestamp();
-            lastAggregationTime = (timestamp > 0) ? timestamp : now;
+        
+        // Process queue every 1 second to prevent overflow
+        if (now - lastQueueProcessTime >= QUEUE_PROCESS_INTERVAL) {
+            processQueueData();  // Drain queue and feed to filters
+            lastQueueProcessTime = now;
         }
+        
+        // Aggregate data every 60 seconds for final statistics
+        if (now - lastAggregationTime >= AGGREGATION_INTERVAL) {
+            Serial.print("Creating 60-second aggregation... Queue size: ");
+            Serial.println(uxQueueMessagesWaiting(dataQueue));
+            aggregateData();
+            lastAggregationTime = now;  // Use millis() consistently for timing
+            Serial.println("60-second aggregation complete");
+        }
+        
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
 }
@@ -243,11 +253,8 @@ void DataCollector::collectSensorData() {
     bool current1Ok = sensorManager->readCurrent1(data.current1);
     bool current2Ok = sensorManager->readCurrent2(data.current2);
     
-    if (tempOk) tempFilter->addSample(data.temperature);
-    if (humOk) humFilter->addSample(data.humidity);
-    if (pressOk) pressFilter->addSample(data.pressure);
-    if (current1Ok) current1Filter->addSample(data.current1);
-    if (current2Ok) current2Filter->addSample(data.current2);
+    // Don't add to filters here - let processQueueData() handle it
+    // This prevents double-adding samples to filters
     
     data.valid = tempOk && humOk && pressOk && current1Ok && current2Ok;
     
@@ -263,21 +270,60 @@ void DataCollector::collectSensorData() {
     }
 }
 
+void DataCollector::processQueueData() {
+    SensorData data;
+    int processed = 0;
+    
+    // Process all available samples to prevent queue overflow
+    // Since we collect 1 sample/second, this should typically process 1-2 samples
+    while (xQueueReceive(dataQueue, &data, 0) == pdTRUE) {
+        if (data.valid) {
+            // Feed data to filters for smoothing
+            tempFilter->addSample(data.temperature);
+            humFilter->addSample(data.humidity);  
+            pressFilter->addSample(data.pressure);
+            current1Filter->addSample(data.current1);
+            current2Filter->addSample(data.current2);
+        }
+        processed++;
+        
+        // Safety limit to prevent infinite loop
+        if (processed >= 100) {
+            Serial.println("WARNING: Queue processing limit reached, queue may be overflowing");
+            break;
+        }
+    }
+    
+    if (processed > 0) {
+        Serial.print("Processed ");
+        Serial.print(processed);
+        Serial.print(" samples. Queue remaining: ");
+        Serial.println(uxQueueMessagesWaiting(dataQueue));
+    }
+}
+
 void DataCollector::aggregateData() {
     if (!tempFilter->isReady() || !current1Filter->isReady()) {
+        Serial.println("Filters not ready, skipping aggregation");
         return;
     }
+    
+    Serial.println("Starting actual data aggregation...");
     
     AggregatedData aggregated;
     extern unsigned long getCurrentTimestamp();
     unsigned long currentTime = getCurrentTimestamp();
-    if (currentTime > 0) {
-        aggregated.startTime = lastAggregationTime > 1600000000 ? lastAggregationTime : currentTime;
+    
+    // Use unix timestamps if available, otherwise use 0 to indicate invalid
+    if (currentTime > 1600000000) {
+        // We have valid unix timestamps
+        unsigned long startUnixTime = currentTime - (AGGREGATION_INTERVAL / 1000);  // 60 seconds ago
+        aggregated.startTime = startUnixTime;
         aggregated.endTime = currentTime;
     } else {
-        // Fallback to millis if NTP not available
-        aggregated.startTime = lastAggregationTime;
-        aggregated.endTime = millis();
+        // NTP not synced - use 0 to indicate invalid timestamps
+        aggregated.startTime = 0;
+        aggregated.endTime = 0;
     }
     aggregated.sampleCount = min(tempFilter->getSampleCount(), current1Filter->getSampleCount());
     
