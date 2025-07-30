@@ -787,11 +787,30 @@ void handleAPI_Status(AsyncWebServerRequest *request) {
     doc["timeSync"] = timeClient.isTimeSet();
     doc["epochTime"] = timeClient.getEpochTime();
     
+    // API Status and Send Info
     if (apiClient) {
         doc["api"] = apiClient->getConnectionStatus();
         doc["bufferedData"] = apiClient->getBufferedCount();
+        doc["lastHttpStatus"] = last_http_status_code;
     } else {
         doc["api"] = "Not Configured";
+        doc["lastHttpStatus"] = -1;
+    }
+    
+    // Data Send Status
+    doc["lastDataSendTime"] = last_data_send_time > 0 ? last_data_send_time : 0;
+    doc["lastSendAttemptTime"] = last_send_attempt_time > 0 ? last_send_attempt_time : 0;
+    doc["lastSendSuccess"] = last_send_success;
+    doc["sendErrorCount"] = send_error_count;
+    
+    // Aggregator Status
+    if (dataCollector) {
+        AggregatedData tempData;
+        doc["hasAggregatedData"] = dataCollector->getAggregatedData(tempData);
+        doc["queueSize"] = dataCollector->getQueueSize();
+    } else {
+        doc["hasAggregatedData"] = false;
+        doc["queueSize"] = 0;
     }
     
     doc["lora"] = lora_enabled ? "Ready" : "Disabled";

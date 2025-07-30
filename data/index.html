@@ -94,8 +94,24 @@
           return new Date(timestamp).toLocaleTimeString()
         }
 
+        const formatTimeSince = (timestamp) => {
+          const now = Date.now()
+          const diff = now - timestamp
+          const seconds = Math.floor(diff / 1000)
+          const minutes = Math.floor(seconds / 60)
+          const hours = Math.floor(minutes / 60)
+          
+          if (hours > 0) {
+            return `${hours}h ${minutes % 60}m ago`
+          } else if (minutes > 0) {
+            return `${minutes}m ${seconds % 60}s ago`
+          } else {
+            return `${seconds}s ago`
+          }
+        }
+
         const getStatusClass = (status) => {
-          if (status === 'Normal' || status === 'OK') return 'status-ok'
+          if (status === 'Normal' || status === 'OK' || status === 'Connected') return 'status-ok'
           if (status === 'Warning') return 'status-warning'
           return 'status-error'
         }
@@ -127,10 +143,45 @@
       <div class="sensor-card">
         <div>API</div>
         <div class="sensor-value ${getStatusClass(systemStatus.api)}">${systemStatus.api || 'Unknown'}</div>
+        <div><small>HTTP: ${systemStatus.lastHttpStatus || 'N/A'}</small></div>
       </div>
       <div class="sensor-card">
         <div>Uptime</div>
         <div class="sensor-value">${systemStatus.uptime || '0'}<span class="sensor-unit">s</span></div>
+      </div>
+    </div>
+    
+    <h2>Data Status</h2>
+    <div class="sensor-grid">
+      <div class="sensor-card">
+        <div>Last Data Send</div>
+        <div class="sensor-value">${
+          systemStatus.lastDataSendTime > 0 
+            ? formatTimeSince(systemStatus.lastDataSendTime) 
+            : 'Never'
+        }</div>
+        <div><small>${
+          systemStatus.lastSendSuccess 
+            ? 'Success' 
+            : systemStatus.lastSendAttemptTime > 0 
+              ? 'Failed' 
+              : ''
+        }</small></div>
+      </div>
+      <div class="sensor-card">
+        <div>Send Errors</div>
+        <div class="sensor-value ${systemStatus.sendErrorCount > 0 ? 'status-error' : 'status-ok'}">${systemStatus.sendErrorCount || 0}</div>
+      </div>
+      <div class="sensor-card">
+        <div>Aggregator</div>
+        <div class="sensor-value ${systemStatus.hasAggregatedData ? 'status-ok' : 'status-warning'}">
+          ${systemStatus.hasAggregatedData ? 'Ready' : 'Waiting'}
+        </div>
+        <div><small>Queue: ${systemStatus.queueSize || 0}</small></div>
+      </div>
+      <div class="sensor-card">
+        <div>Buffered Data</div>
+        <div class="sensor-value">${systemStatus.bufferedData || 0}</div>
       </div>
     </div>
 
