@@ -39,7 +39,8 @@ void NoiseFilter::addSample(float sample) {
         return;
     }
     
-    if (samplesCount > 0 && isOutlier(sample)) {
+    // Skip outlier detection for first 3 samples to avoid issues with initialization
+    if (samplesCount > 3 && isOutlier(sample)) {
         return;
     }
     

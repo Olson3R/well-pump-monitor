@@ -3,8 +3,8 @@
 DataCollector::DataCollector(SensorManager* sensorMgr) {
     sensorManager = sensorMgr;
     
-    tempFilter = new NoiseFilter(FILTER_SIZE, 2.0, 0.1);
-    humFilter = new NoiseFilter(FILTER_SIZE, 2.0, 0.1);
+    tempFilter = new NoiseFilter(FILTER_SIZE, 20.0, 0.1);  // Much more lenient for temperature
+    humFilter = new NoiseFilter(FILTER_SIZE, 20.0, 0.1);  // Much more lenient for humidity
     pressFilter = new NoiseFilter(FILTER_SIZE, 2.0, 0.1);
     current1Filter = new NoiseFilter(FILTER_SIZE, 1.5, 0.2);
     current2Filter = new NoiseFilter(FILTER_SIZE, 1.5, 0.2);
@@ -258,14 +258,34 @@ void DataCollector::collectSensorData() {
     // Don't add to filters here - let processQueueData() handle it
     // This prevents double-adding samples to filters
     
-    data.valid = tempOk && humOk && pressOk && current1Ok && current2Ok;
+    // Debug temperature sensor issues with values
+    if (!tempOk || !humOk) {
+        Serial.printf("Temp/Hum read failed - Temp: %s (%.1f), Hum: %s (%.1f)\n", 
+                      tempOk ? "OK" : "FAIL", data.temperature,
+                      humOk ? "OK" : "FAIL", data.humidity);
+    } else {
+        Serial.printf("Temp/Hum read OK - Temp: %.1f°F, Hum: %.1f%%\n", 
+                      data.temperature, data.humidity);
+    }
+    
+    // Debug validation failures
+    if (!tempOk) Serial.println("Temperature validation failed");
+    if (!humOk) Serial.println("Humidity validation failed"); 
+    if (!pressOk) Serial.println("Pressure validation failed");
+    if (!current1Ok) Serial.println("Current1 validation failed");
+    if (!current2Ok) Serial.println("Current2 validation failed");
+    
+    // Allow sample to be valid even if temp/humidity fail occasionally
+    // The main issue is that we need current sensors working for aggregation
+    data.valid = pressOk && current1Ok && current2Ok;
     
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         currentData = data;
         xSemaphoreGive(dataMutex);
     }
     
-    if (data.valid && dataQueue != NULL) {
+    // Always queue samples, even if not fully valid - we'll handle validation in processQueueData
+    if (dataQueue != NULL) {
         if (xQueueSend(dataQueue, &data, 0) != pdTRUE) {
             Serial.println("Data queue full, dropping sample");
         }
@@ -279,13 +299,44 @@ void DataCollector::processQueueData() {
     // Process available samples in batches to reduce CPU overhead
     // With 3-second collection interval, expect 1-2 samples max
     while (xQueueReceive(dataQueue, &data, 0) == pdTRUE && processed < 10) {
-        if (data.valid) {
-            // Feed data to filters for smoothing
+        // Always add samples to filters even if data.valid is false
+        // This ensures all filters get consistent sample counts
+        
+        // Add temperature - use reasonable range check
+        if (data.temperature >= -40.0 && data.temperature <= 150.0) {
+            uint16_t countBefore = tempFilter->getSampleCount();
             tempFilter->addSample(data.temperature);
-            humFilter->addSample(data.humidity);  
+            uint16_t countAfter = tempFilter->getSampleCount();
+            if (countAfter > countBefore) {
+                Serial.printf("Added temp sample %.1f°F to filter (count: %d->%d)\n", 
+                             data.temperature, countBefore, countAfter);
+            } else {
+                Serial.printf("Temp sample %.1f°F REJECTED as outlier (count stays: %d)\n", 
+                             data.temperature, countAfter);
+            }
+        } else {
+            // Use a reasonable default if temperature is invalid (70°F)
+            tempFilter->addSample(70.0);
+            Serial.printf("Invalid temp %.1f, using 70°F default (count now: %d)\n", 
+                         data.temperature, tempFilter->getSampleCount());
+        }
+        
+        // Add humidity - use reasonable range check  
+        if (data.humidity >= 0.0 && data.humidity <= 100.0) {
+            humFilter->addSample(data.humidity);
+        } else {
+            // Use a reasonable default if humidity is invalid (50%)
+            humFilter->addSample(50.0);
+            Serial.printf("Invalid humidity %.1f, using 50%% default\n", data.humidity);
+        }
+        
+        // Add pressure and current only if data is marked valid (these are critical)
+        if (data.valid) {
             pressFilter->addSample(data.pressure);
             current1Filter->addSample(data.current1);
             current2Filter->addSample(data.current2);
+        } else {
+            Serial.println("Skipping pressure/current samples - data invalid");
         }
         processed++;
         

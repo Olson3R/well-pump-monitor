@@ -506,8 +506,10 @@ void setupSensors() {
     
     eventDetector = new EventDetector(dataCollector);
     eventDetector->begin();
-    eventDetector->setThresholds(7.2, 5.0, 38.0);
-    eventDetector->setHysteresis(2.0, 1.0, 2.0);
+    // Increased current threshold to 20A to handle pump motor noise
+    // Reduced pressure threshold to 35 PSI for low pressure detection
+    eventDetector->setThresholds(20.0, 5.0, 35.0);
+    eventDetector->setHysteresis(3.0, 1.0, 2.0);
     
     Serial.println("Sensors initialized successfully");
 }
