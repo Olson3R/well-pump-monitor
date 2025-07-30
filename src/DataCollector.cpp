@@ -202,7 +202,7 @@ void IRAM_ATTR DataCollector::aggregationTaskWrapper(void* parameter) {
 
 void DataCollector::collectionTaskFunction() {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xFrequency = pdMS_TO_TICKS(3000);  // Collect every 3 seconds instead of 1
+    const TickType_t xFrequency = pdMS_TO_TICKS(2000);  // Collect every 2 seconds to get 30 samples per minute
     
     while (running) {
         collectSensorData();
@@ -212,22 +212,23 @@ void DataCollector::collectionTaskFunction() {
 
 void DataCollector::aggregationTaskFunction() {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xFrequency = pdMS_TO_TICKS(5000);  // Run every 5 seconds to reduce CPU load
+    const TickType_t xFrequency = pdMS_TO_TICKS(2000);  // Run every 2 seconds to process queue regularly
     
     while (running) {
         unsigned long now = millis();
         
-        // Process queue less frequently to reduce CPU overhead
-        // With 3-second collection interval, queue should have max 1-2 items
-        if (now - lastQueueProcessTime >= (QUEUE_PROCESS_INTERVAL * 5)) {  // Every 5 seconds
-            processQueueData();  // Drain queue and feed to filters
-            lastQueueProcessTime = now;
-        }
+        // Process queue every 2 seconds to ensure filters get fed regularly
+        processQueueData();  // Always drain queue to feed filters
         
         // Aggregate data every 60 seconds for final statistics
         if (now - lastAggregationTime >= AGGREGATION_INTERVAL) {
             Serial.print("Creating 60-second aggregation... Queue size: ");
             Serial.println(uxQueueMessagesWaiting(dataQueue));
+            Serial.print("Filter sample counts - Temp: ");
+            Serial.print(tempFilter->getSampleCount());
+            Serial.print(", Current1: ");
+            Serial.println(current1Filter->getSampleCount());
+            
             aggregateData();
             lastAggregationTime = now;  // Use millis() consistently for timing
             Serial.println("60-second aggregation complete");
@@ -269,9 +270,6 @@ void DataCollector::collectSensorData() {
             Serial.println("Data queue full, dropping sample");
         }
     }
-    
-    // Brief yield to ensure main loop and higher priority tasks get CPU time
-    vTaskDelay(pdMS_TO_TICKS(10));
 }
 
 void DataCollector::processQueueData() {
