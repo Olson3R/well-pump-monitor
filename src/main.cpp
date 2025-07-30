@@ -663,6 +663,8 @@ void logData() {
             last_send_success = true;
             last_http_status_code = apiClient->getLastHttpStatusCode();
             Serial.println("Data sent successfully!");
+            // Clear the aggregated data so it doesn't get sent again
+            dataCollector->clearAggregatedData();
         } else {
             last_send_success = false;
             send_error_count++;
@@ -699,7 +701,7 @@ void handleAPI_Sensors(AsyncWebServerRequest *request) {
         doc["pressure"] = data.pressure;
         doc["current1"] = data.current1;
         doc["current2"] = data.current2;
-        doc["timestamp"] = data.timestamp;
+        doc["timestamp"] = data.timestamp * 1000;  // Convert to milliseconds
         doc["valid"] = data.valid;
     } else {
         doc["error"] = "No current data available";
@@ -740,8 +742,8 @@ void handleAPI_Aggregated(AsyncWebServerRequest *request) {
         doc["dutyCycle1"] = data.dutyCycle1;
         doc["dutyCycle2"] = data.dutyCycle2;
         doc["sampleCount"] = data.sampleCount;
-        doc["startTime"] = data.startTime;
-        doc["endTime"] = data.endTime;
+        doc["startTime"] = data.startTime * 1000;  // Convert to milliseconds
+        doc["endTime"] = data.endTime * 1000;    // Convert to milliseconds
     } else {
         doc["error"] = "No aggregated data available";
     }
@@ -767,7 +769,7 @@ void handleAPI_Events(AsyncWebServerRequest *request) {
         eventObj["type"] = String((int)event.type);
         eventObj["value"] = event.value;
         eventObj["threshold"] = event.threshold;
-        eventObj["startTime"] = event.startTime;
+        eventObj["startTime"] = event.startTime * 1000;  // Convert to milliseconds
         eventObj["duration"] = event.duration;
         eventObj["active"] = event.active;
         eventObj["description"] = event.description;
@@ -787,7 +789,7 @@ void handleAPI_Status(AsyncWebServerRequest *request) {
     doc["freeHeap"] = ESP.getFreeHeap();
     doc["time"] = timeClient.getFormattedTime();
     doc["timeSync"] = timeClient.isTimeSet();
-    doc["epochTime"] = timeClient.getEpochTime();
+    doc["epochTime"] = timeClient.getEpochTime() * 1000;  // Convert to milliseconds
     
     // API Status and Send Info
     if (apiClient) {

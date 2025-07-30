@@ -27,7 +27,12 @@ struct AggregatedData {
     float dutyCycle1, dutyCycle2;
     unsigned long startTime;
     unsigned long endTime;
-    uint16_t sampleCount;
+    uint16_t tempSampleCount;
+    uint16_t humSampleCount;
+    uint16_t pressSampleCount;
+    uint16_t current1SampleCount;
+    uint16_t current2SampleCount;
+    uint16_t sampleCount; // Keep for backward compatibility - will be the minimum count
 };
 
 class DataCollector {
@@ -54,7 +59,7 @@ private:
     unsigned long lastQueueProcessTime;
     
     static const uint16_t QUEUE_SIZE = 100;
-    static const uint16_t FILTER_SIZE = 20;
+    static const uint16_t FILTER_SIZE = 30;
     static const unsigned long AGGREGATION_INTERVAL = 60000;  // Aggregate over 60-second windows
     static const unsigned long QUEUE_PROCESS_INTERVAL = 1000;  // Process queue every 1 second
     
@@ -70,6 +75,7 @@ public:
     
     bool getCurrentData(SensorData& data);
     bool getAggregatedData(AggregatedData& data);
+    void clearAggregatedData();
     
     void setCurrentThresholds(float threshold1, float threshold2);
     

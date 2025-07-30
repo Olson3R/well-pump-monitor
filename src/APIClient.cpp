@@ -307,7 +307,14 @@ String WellPumpAPIClient::createSensorJSON(const AggregatedData& data) {
     doc["timestamp"] = formatTimestamp(data.endTime);
     doc["startTime"] = formatTimestamp(data.startTime);
     doc["endTime"] = formatTimestamp(data.endTime);
-    doc["sampleCount"] = data.sampleCount;
+    doc["sampleCount"] = data.sampleCount; // Keep for backward compatibility
+    
+    // Individual sample counts for each metric - commented out to maintain API contract
+    // doc["tempSampleCount"] = data.tempSampleCount;
+    // doc["humSampleCount"] = data.humSampleCount;
+    // doc["pressSampleCount"] = data.pressSampleCount;
+    // doc["current1SampleCount"] = data.current1SampleCount;
+    // doc["current2SampleCount"] = data.current2SampleCount;
     
     // Temperature data (flattened to match API format)
     doc["tempMin"] = data.tempMin;
@@ -366,7 +373,8 @@ String WellPumpAPIClient::formatTimestamp(unsigned long timestamp) {
     // Check if this looks like a unix timestamp or millis()
     if (timestamp > 1600000000) {
         // Looks like a unix timestamp (seconds since epoch) - convert to milliseconds
-        unsigned long long timestampMs = (unsigned long long)timestamp * 1000;
+        // Use proper 64-bit arithmetic to avoid overflow
+        uint64_t timestampMs = (uint64_t)timestamp * 1000ULL;
         Serial.printf("API: Using unix timestamp %lu -> %llu ms\n", timestamp, timestampMs);
         return String(timestampMs);
     } else {

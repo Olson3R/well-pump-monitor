@@ -143,11 +143,22 @@ bool DataCollector::getAggregatedData(AggregatedData& data) {
     
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         data = lastAggregated;
+        bool hasValidData = (data.sampleCount > 0);
         xSemaphoreGive(dataMutex);
-        return data.sampleCount > 0;
+        return hasValidData;
     }
     
     return false;
+}
+
+void DataCollector::clearAggregatedData() {
+    if (!running) return;
+    
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        memset(&lastAggregated, 0, sizeof(lastAggregated));
+        xSemaphoreGive(dataMutex);
+        Serial.println("DataCollector: Aggregated data cleared after successful send");
+    }
 }
 
 void DataCollector::setCurrentThresholds(float threshold1, float threshold2) {
@@ -355,14 +366,9 @@ void DataCollector::processQueueData() {
 }
 
 void DataCollector::aggregateData() {
-    if (!tempFilter->isReady() || !current1Filter->isReady()) {
-        Serial.println("Filters not ready, skipping aggregation");
-        return;
-    }
+    Serial.println("Starting data aggregation with varied sample counts...");
     
-    Serial.println("Starting actual data aggregation...");
-    
-    AggregatedData aggregated;
+    AggregatedData aggregated = {0}; // Initialize all fields to zero
     extern unsigned long getCurrentTimestamp();
     unsigned long currentTime = getCurrentTimestamp();
     
@@ -377,32 +383,78 @@ void DataCollector::aggregateData() {
         aggregated.startTime = 0;
         aggregated.endTime = 0;
     }
-    aggregated.sampleCount = min(tempFilter->getSampleCount(), current1Filter->getSampleCount());
     
-    aggregated.tempMin = tempFilter->getMin();
-    aggregated.tempMax = tempFilter->getMax();
-    aggregated.tempAvg = tempFilter->getAverage();
+    // Capture individual sample counts for each metric
+    aggregated.tempSampleCount = tempFilter->getSampleCount();
+    aggregated.humSampleCount = humFilter->getSampleCount();
+    aggregated.pressSampleCount = pressFilter->getSampleCount();
+    aggregated.current1SampleCount = current1Filter->getSampleCount();
+    aggregated.current2SampleCount = current2Filter->getSampleCount();
     
-    aggregated.humMin = humFilter->getMin();
-    aggregated.humMax = humFilter->getMax();
-    aggregated.humAvg = humFilter->getAverage();
+    // Keep backward compatibility - use minimum count
+    aggregated.sampleCount = min({aggregated.tempSampleCount, aggregated.humSampleCount, 
+                                 aggregated.pressSampleCount, aggregated.current1SampleCount, 
+                                 aggregated.current2SampleCount});
     
-    aggregated.pressMin = pressFilter->getMin();
-    aggregated.pressMax = pressFilter->getMax();
-    aggregated.pressAvg = pressFilter->getAverage();
+    Serial.printf("Sample counts - Temp: %d, Hum: %d, Press: %d, I1: %d, I2: %d\n",
+                  aggregated.tempSampleCount, aggregated.humSampleCount, aggregated.pressSampleCount,
+                  aggregated.current1SampleCount, aggregated.current2SampleCount);
     
-    aggregated.current1Min = current1Filter->getMin();
-    aggregated.current1Max = current1Filter->getMax();
-    aggregated.current1Avg = current1Filter->getAverage();
-    aggregated.current1RMS = current1Filter->getRMS();
+    // Temperature data - populate if we have samples
+    if (aggregated.tempSampleCount > 0) {
+        aggregated.tempMin = tempFilter->getMin();
+        aggregated.tempMax = tempFilter->getMax();
+        aggregated.tempAvg = tempFilter->getAverage();
+    } else {
+        aggregated.tempMin = aggregated.tempMax = aggregated.tempAvg = 0.0;
+        Serial.println("No temperature samples available");
+    }
     
-    aggregated.current2Min = current2Filter->getMin();
-    aggregated.current2Max = current2Filter->getMax();
-    aggregated.current2Avg = current2Filter->getAverage();
-    aggregated.current2RMS = current2Filter->getRMS();
+    // Humidity data - populate if we have samples
+    if (aggregated.humSampleCount > 0) {
+        aggregated.humMin = humFilter->getMin();
+        aggregated.humMax = humFilter->getMax();
+        aggregated.humAvg = humFilter->getAverage();
+    } else {
+        aggregated.humMin = aggregated.humMax = aggregated.humAvg = 0.0;
+        Serial.println("No humidity samples available");
+    }
     
-    aggregated.dutyCycle1 = calculateDutyCycle(current1Filter, currentThreshold1);
-    aggregated.dutyCycle2 = calculateDutyCycle(current2Filter, currentThreshold2);
+    // Pressure data - populate if we have samples
+    if (aggregated.pressSampleCount > 0) {
+        aggregated.pressMin = pressFilter->getMin();
+        aggregated.pressMax = pressFilter->getMax();
+        aggregated.pressAvg = pressFilter->getAverage();
+    } else {
+        aggregated.pressMin = aggregated.pressMax = aggregated.pressAvg = 0.0;
+        Serial.println("No pressure samples available");
+    }
+    
+    // Current 1 data - populate if we have samples
+    if (aggregated.current1SampleCount > 0) {
+        aggregated.current1Min = current1Filter->getMin();
+        aggregated.current1Max = current1Filter->getMax();
+        aggregated.current1Avg = current1Filter->getAverage();
+        aggregated.current1RMS = current1Filter->getRMS();
+        aggregated.dutyCycle1 = calculateDutyCycle(current1Filter, currentThreshold1);
+    } else {
+        aggregated.current1Min = aggregated.current1Max = aggregated.current1Avg = aggregated.current1RMS = 0.0;
+        aggregated.dutyCycle1 = 0.0;
+        Serial.println("No current1 samples available");
+    }
+    
+    // Current 2 data - populate if we have samples
+    if (aggregated.current2SampleCount > 0) {
+        aggregated.current2Min = current2Filter->getMin();
+        aggregated.current2Max = current2Filter->getMax();
+        aggregated.current2Avg = current2Filter->getAverage();
+        aggregated.current2RMS = current2Filter->getRMS();
+        aggregated.dutyCycle2 = calculateDutyCycle(current2Filter, currentThreshold2);
+    } else {
+        aggregated.current2Min = aggregated.current2Max = aggregated.current2Avg = aggregated.current2RMS = 0.0;
+        aggregated.dutyCycle2 = 0.0;
+        Serial.println("No current2 samples available");
+    }
     
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         lastAggregated = aggregated;
