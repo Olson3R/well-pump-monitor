@@ -70,7 +70,7 @@ bool DataCollector::begin() {
         "DataCollection",
         8192,
         this,
-        2,
+        1,  // Lower priority to give more CPU to aggregation and main loop
         &collectionTask
     );
     
@@ -80,7 +80,7 @@ bool DataCollector::begin() {
         "DataAggregation",
         8192,
         this,
-        4,  // Much higher priority than collection task
+        3,  // High priority to ensure data aggregation happens
         &aggregationTask
     );
     
@@ -202,7 +202,7 @@ void IRAM_ATTR DataCollector::aggregationTaskWrapper(void* parameter) {
 
 void DataCollector::collectionTaskFunction() {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xFrequency = pdMS_TO_TICKS(1000);
+    const TickType_t xFrequency = pdMS_TO_TICKS(3000);  // Collect every 3 seconds instead of 1
     
     while (running) {
         collectSensorData();
@@ -212,13 +212,14 @@ void DataCollector::collectionTaskFunction() {
 
 void DataCollector::aggregationTaskFunction() {
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    const TickType_t xFrequency = pdMS_TO_TICKS(100);  // Run every 100ms instead of 10s
+    const TickType_t xFrequency = pdMS_TO_TICKS(5000);  // Run every 5 seconds to reduce CPU load
     
     while (running) {
         unsigned long now = millis();
         
-        // Process queue every 1 second to prevent overflow
-        if (now - lastQueueProcessTime >= QUEUE_PROCESS_INTERVAL) {
+        // Process queue less frequently to reduce CPU overhead
+        // With 3-second collection interval, queue should have max 1-2 items
+        if (now - lastQueueProcessTime >= (QUEUE_PROCESS_INTERVAL * 5)) {  // Every 5 seconds
             processQueueData();  // Drain queue and feed to filters
             lastQueueProcessTime = now;
         }
@@ -268,15 +269,18 @@ void DataCollector::collectSensorData() {
             Serial.println("Data queue full, dropping sample");
         }
     }
+    
+    // Brief yield to ensure main loop and higher priority tasks get CPU time
+    vTaskDelay(pdMS_TO_TICKS(10));
 }
 
 void DataCollector::processQueueData() {
     SensorData data;
     int processed = 0;
     
-    // Process all available samples to prevent queue overflow
-    // Since we collect 1 sample/second, this should typically process 1-2 samples
-    while (xQueueReceive(dataQueue, &data, 0) == pdTRUE) {
+    // Process available samples in batches to reduce CPU overhead
+    // With 3-second collection interval, expect 1-2 samples max
+    while (xQueueReceive(dataQueue, &data, 0) == pdTRUE && processed < 10) {
         if (data.valid) {
             // Feed data to filters for smoothing
             tempFilter->addSample(data.temperature);
@@ -287,10 +291,9 @@ void DataCollector::processQueueData() {
         }
         processed++;
         
-        // Safety limit to prevent infinite loop
-        if (processed >= 100) {
-            Serial.println("WARNING: Queue processing limit reached, queue may be overflowing");
-            break;
+        // Yield CPU after each sample to allow other tasks to run
+        if (processed % 5 == 0) {
+            vTaskDelay(pdMS_TO_TICKS(1));  // Brief yield
         }
     }
     
