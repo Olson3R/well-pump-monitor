@@ -677,11 +677,22 @@ void logData() {
     }
     
     if (eventDetector) {
+        // Send active events
         for (uint8_t i = 0; i < eventDetector->getEventCount(); i++) {
             Event event = eventDetector->getEvent(i);
             if (event.active) {
                 apiClient->sendEvent(event);
             }
+        }
+
+        // Send resolved events (conditions that have cleared)
+        if (eventDetector->hasResolvedEvents()) {
+            for (uint8_t i = 0; i < eventDetector->getResolvedEventCount(); i++) {
+                Event event = eventDetector->getResolvedEvent(i);
+                apiClient->sendEvent(event);
+                Serial.printf("Sent resolved event: type=%d\n", (int)event.type);
+            }
+            eventDetector->clearResolvedEvents();
         }
     }
 }

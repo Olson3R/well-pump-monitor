@@ -20,13 +20,15 @@ EventDetector::EventDetector(DataCollector* collector) {
     temperatureEventDuration = 0;
     
     eventCount = 0;
-    
+    resolvedEventCount = 0;
+
     highCurrentActive = false;
     lowPressureActive = false;
     lowTemperatureActive = false;
     sensorErrorActive = false;
     
     memset(currentEvents, 0, sizeof(currentEvents));
+    memset(resolvedEvents, 0, sizeof(resolvedEvents));
 }
 
 void EventDetector::begin() {
@@ -272,8 +274,28 @@ void EventDetector::addEvent(EventType type, float value, float threshold, const
 void EventDetector::clearEvent(EventType type) {
     int index = findEventIndex(type);
     if (index >= 0) {
+        // Queue for sending as resolved before removing
+        if (resolvedEventCount < 10) {
+            resolvedEvents[resolvedEventCount] = currentEvents[index];
+            resolvedEvents[resolvedEventCount].active = false;
+            resolvedEventCount++;
+        }
         removeEvent(index);
     }
+}
+
+Event EventDetector::getResolvedEvent(uint8_t index) const {
+    if (index < resolvedEventCount) {
+        return resolvedEvents[index];
+    }
+    Event empty;
+    memset(&empty, 0, sizeof(empty));
+    return empty;
+}
+
+void EventDetector::clearResolvedEvents() {
+    resolvedEventCount = 0;
+    memset(resolvedEvents, 0, sizeof(resolvedEvents));
 }
 
 void EventDetector::updateEvent(EventType type, float value, unsigned long duration) {

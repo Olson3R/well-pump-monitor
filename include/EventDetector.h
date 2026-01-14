@@ -44,6 +44,9 @@ private:
     
     Event currentEvents[10];
     uint8_t eventCount;
+
+    Event resolvedEvents[10];
+    uint8_t resolvedEventCount;
     
     bool highCurrentActive;
     bool lowPressureActive;
@@ -66,6 +69,11 @@ public:
     bool hasActiveEvents() const;
     uint8_t getEventCount() const { return eventCount; }
     Event getEvent(uint8_t index) const;
+
+    bool hasResolvedEvents() const { return resolvedEventCount > 0; }
+    uint8_t getResolvedEventCount() const { return resolvedEventCount; }
+    Event getResolvedEvent(uint8_t index) const;
+    void clearResolvedEvents();
     
     bool isHighCurrentActive() const { return highCurrentActive; }
     bool isLowPressureActive() const { return lowPressureActive; }
